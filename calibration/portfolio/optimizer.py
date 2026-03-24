@@ -122,6 +122,7 @@ class PortfolioOptimizer:
             mezzanine_coupon=vehicle.mezzanine_coupon,
             mezzanine_fraction=vehicle.mezzanine_fraction,
             lifetime_years=T,
+            discount_rate=vehicle.discount_rate,
         )
 
     def _calibrate_vehicle(

@@ -1,8 +1,13 @@
 # Calibration Tool
 
-**SCA Portfolio Calibration Tool** — solves for the minimum catalytic capital (first-loss equity, grants, guarantees) required to make a blended-finance vehicle investable for commercial investors.
+**Decision engine for allocating catalytic capital across blended-finance portfolios.**
 
-The system models the full hierarchy: **PROJECT → VEHICLE → PORTFOLIO**. Catalytic capital is never an input — it is solved via calibration.
+It solves the core question in blended finance: *how much concessional capital is the minimum needed to make a vehicle commercially investable?* — and then optimises its allocation across a portfolio of vehicles to maximise leverage (commercial capital mobilised per catalytic dollar).
+
+The system models the full hierarchy: **PROJECT → VEHICLE → PORTFOLIO**.
+- **Calibration** solves the minimum catalytic fraction per vehicle using Brent's method.
+- **Portfolio optimisation** allocates capital across vehicles via a CVaR-constrained LP.
+- **Catalytic capital is never an input** — it is always a solved output.
 
 ---
 
@@ -35,6 +40,44 @@ All 23 tests should pass in under 5 seconds.
 ## Loading Your Own Data
 
 ### Option A — CSV files
+
+Two CSV sub-formats are supported and **auto-detected** per file.
+
+#### A1. Cashflow-based format (recommended for detailed forecasts)
+
+Each file represents one project. Columns: `year` and `cashflow`.
+
+| Column | Description |
+|---|---|
+| `year` | Period index (0 = capex outflow, 1..T = operating periods) |
+| `cashflow` | Net cashflow for that period (negative at year 0 = capex) |
+
+**Example** (`examples/cashflow_vehicle.csv`):
+
+```csv
+year,cashflow
+0,-1500000
+1,180000
+2,210000
+3,240000
+4,260000
+5,270000
+10,1650000
+```
+
+Run:
+```bash
+python run_e2e.py --csv examples/
+```
+
+The simulator scales the supplied cashflows per path using a lognormal multiplier
+(sigma = `price_vol`, default 0.15). Set `price_vol` via JSON for tighter/looser
+volatility. This mode is ideal when you have a financial model that produces an
+explicit year-by-year cashflow forecast.
+
+#### A2. Parametric format (for factor-driven Monte Carlo)
+
+Each file can contain multiple projects (one row per project). Columns below.
 
 Create one CSV file per vehicle named `projects_vehicle_1.csv`, `projects_vehicle_2.csv`, etc. Place them in a directory (e.g. `examples/`).
 
@@ -115,8 +158,9 @@ A single JSON file specifies the entire portfolio including vehicle-level parame
 | `mezzanine_fraction` | float | Fraction of total capital in mezzanine tranche |
 | `senior_coupon` | float | Senior annual coupon rate (default 0.08) |
 | `mezzanine_coupon` | float | Mezzanine annual coupon rate (default 0.12) |
+| `discount_rate` | float | Discount rate for NPV-based loss (default 0.0 = sum-based) |
 | `correlation_matrix` | J×J array | Project-level correlation matrix |
-| `projects` | array | List of project objects (same fields as CSV) |
+| `projects` | array | List of project objects (same fields as parametric CSV, plus `base_cashflows`) |
 
 **Example** (`examples/portfolio.json`):
 

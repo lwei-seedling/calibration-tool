@@ -54,10 +54,20 @@ class CatalyticCalibrator:
     def _h(self, alpha: float) -> float:
         """Objective function: negative when infeasible, non-negative when feasible.
 
-        h(alpha) = min(
-            median_IRR_senior(alpha) - hurdle_irr,
-            max_loss_prob - loss_prob_senior(alpha)
-        )
+        h(alpha) = min(g1(alpha), g2(alpha))
+
+        where:
+            g1(alpha) = median_IRR_senior(alpha) - hurdle_irr
+            g2(alpha) = max_loss_prob - loss_prob_senior(alpha)
+
+        Note on smoothness: min(g1, g2) is non-smooth at the boundary where
+        g1 == g2 (the kink). For well-conditioned calibrations this is rarely
+        the root and Brent's method handles it correctly (it only requires a
+        sign change, not differentiability). If the kink causes convergence
+        issues, consider replacing min() with a smooth penalty such as:
+            h(alpha) = g1(alpha) + g2(alpha) - |g1(alpha) - g2(alpha)|  (LogSumExp)
+        or evaluating the two constraints sequentially (find min alpha s.t.
+        g1>=0, then verify g2>=0 at that point).
         """
         cfg = self.config
         results = self.capital_stack.waterfall(self.vehicle_cashflows, alpha)

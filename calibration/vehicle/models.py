@@ -34,6 +34,12 @@ class VehicleInputs(BaseModel):
     mezzanine_coupon: float = Field(
         0.12, ge=0.0, description="Annual coupon rate for mezzanine tranche."
     )
+    discount_rate: float = Field(
+        0.0, ge=0.0,
+        description="Annual discount rate for NPV-based terminal loss computation "
+                    "in the loss waterfall. Default 0.0 gives undiscounted (sum-based) "
+                    "loss for backward compatibility."
+    )
 
     @model_validator(mode="after")
     def validate_correlation_matrix(self) -> "VehicleInputs":

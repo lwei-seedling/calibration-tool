@@ -80,6 +80,34 @@ def batch_irr(cashflows: np.ndarray) -> np.ndarray:
     return result
 
 
+def npv_loss(cashflows: np.ndarray, discount_rate: float = 0.0) -> np.ndarray:
+    """NPV-based terminal loss for each simulation path.
+
+    L[s] = max(0, -NPV(CF[s], discount_rate))
+
+    This is the primary loss metric fed into the loss waterfall. Using NPV
+    (rather than a simple undiscounted sum) accounts for the time value of
+    money: a recovery that arrives 15 years from now is worth less than an
+    equivalent near-term loss.
+
+    When discount_rate=0.0 (the default for backward compatibility) the
+    result is identical to max(0, -sum(CF)), preserving existing behaviour.
+
+    Args:
+        cashflows: shape (n_sims, T+1); axis-1 index 0 is the t=0 outflow.
+        discount_rate: annual discount rate. 0.0 → undiscounted (sum-based).
+
+    Returns:
+        loss array of shape (n_sims,), non-negative.
+    """
+    cashflows = np.asarray(cashflows, dtype=float)
+    T = cashflows.shape[1] - 1
+    t = np.arange(T + 1, dtype=float)
+    discount_factors = (1.0 + discount_rate) ** t   # shape (T+1,)
+    npv = (cashflows / discount_factors).sum(axis=1)  # shape (n_sims,)
+    return np.maximum(0.0, -npv)
+
+
 def clean_irr(irr_vector: np.ndarray) -> np.ndarray:
     """Replace NaN with -1.0 and cap +inf at 10.0 for safe statistics.
 

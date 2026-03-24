@@ -178,15 +178,63 @@ _BUILT_IN_NAMES = ["East Africa Nature Fund", "West Africa Clean Energy Fund"]
 # CSV loader
 # ---------------------------------------------------------------------------
 
+def _is_cashflow_format(df: pd.DataFrame) -> bool:
+    """Return True if the CSV uses the cashflow format (year + cashflow columns).
+
+    Option A — cashflow format:  columns are 'year' and 'cashflow'
+    Option B — parametric format: columns include 'capex', 'price', etc.
+    """
+    cols = {c.strip().lower() for c in df.columns}
+    return "year" in cols and "cashflow" in cols and "capex" not in cols
+
+
+def _project_from_cashflow_csv(df: pd.DataFrame, price_vol: float = 0.15) -> ProjectInputs:
+    """Build a ProjectInputs from a cashflow-format CSV.
+
+    Expected columns:
+        year     : integer period (0 = capex outflow, 1..T = operating CFs)
+        cashflow : net cashflow for that period
+
+    If year=0 is present with a negative value, it is treated as capex.
+    All other rows (year >= 1) are treated as base_cashflows.
+    """
+    df = df.copy()
+    df.columns = [c.strip().lower() for c in df.columns]
+    df = df.sort_values("year").reset_index(drop=True)
+
+    capex = 0.0
+    if df["year"].min() == 0:
+        t0_val = float(df.loc[df["year"] == 0, "cashflow"].iloc[0])
+        if t0_val < 0:
+            capex = abs(t0_val)
+        df = df[df["year"] > 0]
+
+    base_cashflows = df["cashflow"].tolist()
+    if not base_cashflows:
+        raise ValueError("Cashflow CSV has no operating-period rows (year >= 1).")
+
+    return ProjectInputs(
+        capex=capex if capex > 0 else None,
+        base_cashflows=base_cashflows,
+        price_vol=price_vol,
+    )
+
+
 def _load_csv_inputs(csv_dir: Path, n_sims: int, seed: int | None) -> tuple[PortfolioInputs, list[str]]:
     """Load all projects_vehicle_N.csv files from a directory.
 
-    Each CSV must have columns:
-      name, capex, opex_annual, price, yield_, lifetime_years,
-      price_vol, yield_vol, inflation_rate, fx_vol, delay_prob
+    Auto-detects the CSV format per file:
+
+    **Option A — cashflow format** (columns: year, cashflow):
+        Each row is a single period. Year 0 (if present and negative) is the
+        capex outflow. Years 1..T are base operating cashflows for one project.
+        A single cashflow-format file per vehicle defines ONE project.
+
+    **Option B — parametric format** (columns: capex, opex_annual, price, yield_, ...):
+        Each row is one project. Multiple rows = multiple projects in one vehicle.
 
     Vehicle-level settings (correlation_matrix, total_capital, etc.) are inferred
-    from the projects or set to conservative defaults. For full control, use --json.
+    and set to conservative defaults. For full control, use --json.
 
     Returns:
         (PortfolioInputs, list of vehicle names)
@@ -200,31 +248,47 @@ def _load_csv_inputs(csv_dir: Path, n_sims: int, seed: int | None) -> tuple[Port
     names = []
     for csv_path in csv_files:
         df = pd.read_csv(csv_path)
-        required = {"capex", "opex_annual", "price", "yield_", "lifetime_years"}
-        missing = required - set(df.columns)
-        if missing:
-            print(f"ERROR: {csv_path.name} is missing columns: {missing}")
-            sys.exit(1)
 
-        projects = []
-        for _, row in df.iterrows():
-            projects.append(ProjectInputs(
-                capex=float(row["capex"]),
-                opex_annual=float(row["opex_annual"]),
-                price=float(row["price"]),
-                yield_=float(row["yield_"]),
-                lifetime_years=int(row["lifetime_years"]),
-                price_vol=float(row.get("price_vol", 0.15)),
-                yield_vol=float(row.get("yield_vol", 0.10)),
-                inflation_rate=float(row.get("inflation_rate", 0.03)),
-                fx_vol=float(row.get("fx_vol", 0.05)),
-                delay_prob=float(row.get("delay_prob", 0.05)),
-            ))
+        if _is_cashflow_format(df):
+            # ----- Option A: cashflow format — one project per file -----
+            print(f"  {csv_path.name}: detected cashflow format (year, cashflow)")
+            try:
+                project = _project_from_cashflow_csv(df)
+            except ValueError as exc:
+                print(f"ERROR parsing {csv_path.name}: {exc}")
+                sys.exit(1)
+            projects = [project]
+        else:
+            # ----- Option B: parametric format — one project per row -----
+            required = {"capex", "opex_annual", "price", "yield_", "lifetime_years"}
+            missing = required - set(df.columns)
+            if missing:
+                print(f"ERROR: {csv_path.name} is missing columns: {missing}")
+                sys.exit(1)
+
+            projects = []
+            for _, row in df.iterrows():
+                projects.append(ProjectInputs(
+                    capex=float(row["capex"]),
+                    opex_annual=float(row["opex_annual"]),
+                    price=float(row["price"]),
+                    yield_=float(row["yield_"]),
+                    lifetime_years=int(row["lifetime_years"]),
+                    price_vol=float(row.get("price_vol", 0.15)),
+                    yield_vol=float(row.get("yield_vol", 0.10)),
+                    inflation_rate=float(row.get("inflation_rate", 0.03)),
+                    fx_vol=float(row.get("fx_vol", 0.05)),
+                    delay_prob=float(row.get("delay_prob", 0.05)),
+                ))
 
         J = len(projects)
         # Default correlation: moderate positive (0.30 off-diagonal)
         corr = [[1.0 if i == j else 0.30 for j in range(J)] for i in range(J)]
-        total_capital = sum(p.capex for p in projects) * 1.2  # 20% buffer over total capex
+        # For cashflow-mode projects capex may be 0; estimate total capital from CFs
+        capex_sum = sum(
+            (p.capex or abs(min(p.base_cashflows or [0]))) for p in projects
+        )
+        total_capital = max(capex_sum, 1.0) * 1.2  # 20% buffer
 
         vehicles.append(VehicleInputs(
             projects=projects,
@@ -236,7 +300,6 @@ def _load_csv_inputs(csv_dir: Path, n_sims: int, seed: int | None) -> tuple[Port
             senior_coupon=0.08,
             mezzanine_coupon=0.12,
         ))
-        # Vehicle name: from CSV filename or 'name' column if present
         vname = csv_path.stem.replace("projects_", "").replace("_", " ").title()
         names.append(vname)
 

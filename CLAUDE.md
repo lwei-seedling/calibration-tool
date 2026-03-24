@@ -61,7 +61,7 @@ pytest tests/test_vehicle.py -v
 pytest tests/test_portfolio.py -v
 ```
 
-All 23 tests should pass. A warning about negative NPV on a stress-test project is expected.
+All tests should pass. A warning about negative NPV on a stress-test project is expected.
 
 ---
 
@@ -85,19 +85,29 @@ Junior → Senior, following DFI practice (MIGA, DFC, GuarantCo):
 ```
 Grant Reserve → First-Loss → Mezzanine → Guarantee (wraps Senior) → Senior
 ```
-The guarantee is **not** a sequential layer before first-loss. It wraps the senior
-tranche specifically — modeled as intercepting residual loss after first-loss and
-mezzanine are exhausted.
+The guarantee is **not** a sequential layer before first-loss. It is applied to
+**senior tranche losses after all subordination layers are exhausted**:
+`senior_loss_gross → apply guarantee → senior_loss_net`. This matches DFI
+practice (MIGA, DFC, GuarantCo guarantee senior noteholders, not catalytic capital).
 
 ### 2. Dual waterfall basis
-- **Loss waterfall** operates on **cumulative terminal loss** `L[s] = max(0, -∑CF[s,t])`
-  — only permanent shortfalls count; ramp-up losses recoverable from later cashflows are not losses.
+- **Loss waterfall** operates on **NPV-based terminal loss**
+  `L[s] = max(0, -NPV(CF[s], discount_rate))` where `discount_rate` defaults
+  to 0.0 (undiscounted, backward-compatible). Set `discount_rate > 0` on
+  `VehicleInputs` to enable time-value-of-money discounting in loss calculations.
 - **Cashflow waterfall** operates **per-period** — investors receive distributions as generated.
 
 ### 3. Correlation at vehicle level
-Projects simulate independently with independent shocks. At vehicle aggregation,
-Iman-Conover rank-based reordering induces the specified cross-project correlation.
-The `corr_matrix` in `VehicleInputs` is a J×J project-level correlation matrix.
+Post-simulation correlation is applied at project aggregation (vehicle level).
+Rank-based reordering (Iman-Conover style) reorders each project's simulation
+paths to match a target Cholesky-decomposed correlation structure. The
+`corr_matrix` in `VehicleInputs` is a J×J project-level correlation matrix.
+
+**Note:** This is an approximation — it correlates total lifetime cashflow
+rankings, not the underlying stochastic drivers. A future extension would
+correlate underlying risk factors (price shocks, yield shocks) at draw time.
+`ProjectSimulator` does not hardcode independence assumptions and can accept
+pre-correlated shocks.
 
 ### 4. Calibration algorithm
 `CatalyticCalibrator.calibrate()`:
@@ -105,6 +115,12 @@ The `corr_matrix` in `VehicleInputs` is a J×J project-level correlation matrix.
 2. If monotone → `scipy.optimize.brentq` (10–15 evaluations, xtol=1e-4)
 3. If not monotone → two-phase grid search (50 coarse + 50 fine points)
 4. Common-random-numbers: paths are pre-generated once, reused across all α evaluations
+
+**Calibration objective note:** `_h(alpha) = min(g1, g2)` where g1 is the
+IRR constraint slack and g2 is the loss-probability constraint slack. The
+`min()` creates a kink where g1==g2, which is non-smooth but still valid
+for Brent's method (sign change is sufficient). If the kink causes issues,
+consider sequential constraint evaluation or a smooth LogSumExp surrogate.
 
 ### 5. IRR sentinels
 - `-1.0` → total loss (no positive inflows, capex outflow present)

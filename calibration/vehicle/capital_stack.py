@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from calibration.utils.irr import batch_irr, clean_irr
+from calibration.utils.irr import batch_irr, clean_irr, npv_loss
 from calibration.utils.stats import var, cvar
 from calibration.vehicle.models import TrancheResult
 from calibration.vehicle.risk_mitigants import Guarantee, GrantReserve
@@ -25,7 +25,9 @@ class CapitalStack:
       1. Grant Reserve
       2. First-Loss / Equity
       3. Mezzanine
-      4. Guarantee (wrapping Senior)
+      4. Guarantee (applied to senior tranche losses after all subordination
+                    layers are exhausted: senior_loss_gross → guarantee →
+                    senior_loss_net)
       5. Senior
 
     Cashflow waterfall (per-period, senior → junior):
@@ -42,6 +44,9 @@ class CapitalStack:
         mezzanine_coupon: Annual coupon on mezzanine tranche.
         mezzanine_fraction: Fraction of total capital in mezzanine tranche.
         lifetime_years: Project lifetime (number of operating periods).
+        discount_rate: Annual discount rate for NPV-based terminal loss.
+                       Default 0.0 gives undiscounted (sum-based) loss for
+                       backward compatibility.
     """
 
     def __init__(
@@ -53,6 +58,7 @@ class CapitalStack:
         mezzanine_coupon: float,
         mezzanine_fraction: float,
         lifetime_years: int,
+        discount_rate: float = 0.0,
     ) -> None:
         self.total_capital = total_capital
         self.grant_reserve = grant_reserve
@@ -61,6 +67,7 @@ class CapitalStack:
         self.mezzanine_coupon = mezzanine_coupon
         self.mezzanine_fraction = mezzanine_fraction
         self.lifetime_years = lifetime_years
+        self.discount_rate = discount_rate
 
     def _build_tranches(self, alpha: float) -> tuple[_Tranche, _Tranche, _Tranche]:
         """Build tranche notionals given catalytic fraction alpha.
@@ -99,7 +106,7 @@ class CapitalStack:
         """Distribute terminal losses across layers.
 
         Args:
-            terminal_loss: shape (n_sims,), L[s] = max(0, -sum_t CF[s,t])
+            terminal_loss: shape (n_sims,), L[s] = max(0, -NPV(CF[s], r))
             alpha: catalytic fraction
 
         Returns:
@@ -235,8 +242,8 @@ class CapitalStack:
         """
         fl, mezz, senior = self._build_tranches(alpha)
 
-        # --- Terminal loss per path ---
-        terminal_loss = np.maximum(0.0, -vehicle_cashflows.sum(axis=1))
+        # --- Terminal loss per path (NPV-based; discount_rate=0.0 → sum-based) ---
+        terminal_loss = npv_loss(vehicle_cashflows, self.discount_rate)
 
         # --- Loss waterfall ---
         loss_absorbed = self._loss_waterfall(terminal_loss, alpha)
