@@ -61,12 +61,21 @@ class PortfolioOptimizer:
         base_seed = (inputs.seed or 0) + seed_offset * 1000
 
         # Simulate each project independently first
-        project_cashflows = []
-        T = vehicle.projects[0].lifetime_years
+        project_cashflows_raw = []
         for j, proj_inputs in enumerate(vehicle.projects):
             sim = ProjectSimulator(proj_inputs)
             result = sim.run(n_sims=n_sims, seed=base_seed + j)
-            project_cashflows.append(result.cashflows)  # (n_sims, T+1)
+            project_cashflows_raw.append(result.cashflows)  # (n_sims, T_j+1)
+
+        # Pad all cashflow arrays to the maximum lifetime in this vehicle so
+        # they can be summed into a single (n_sims, T_max+1) matrix.
+        T = max(cfs.shape[1] - 1 for cfs in project_cashflows_raw)
+        project_cashflows = []
+        for cfs in project_cashflows_raw:
+            if cfs.shape[1] < T + 1:
+                pad_cols = T + 1 - cfs.shape[1]
+                cfs = np.concatenate([cfs, np.zeros((n_sims, pad_cols))], axis=1)
+            project_cashflows.append(cfs)
 
         # Re-correlate project cashflows at vehicle level using Cholesky
         # We correlate per-period cashflow innovations across projects.
@@ -101,7 +110,7 @@ class PortfolioOptimizer:
 
     def _build_capital_stack(self, vehicle_idx: int) -> CapitalStack:
         vehicle = self.inputs.vehicles[vehicle_idx]
-        T = vehicle.projects[0].lifetime_years
+        T = max(p.lifetime_years for p in vehicle.projects)
         return CapitalStack(
             total_capital=vehicle.total_capital,
             grant_reserve=GrantReserve(vehicle.grant_reserve),
