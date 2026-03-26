@@ -31,7 +31,8 @@ calibration/
 │   └── optimizer.py   # PortfolioOptimizer: full pipeline + cvxpy LP
 └── utils/
     ├── irr.py         # batch_irr(), clean_irr() with edge-case sentinels
-    └── stats.py       # var(), cvar(), cholesky_correlated_draws()
+    ├── stats.py       # var(), cvar(), cholesky_correlated_draws()
+    └── loaders.py     # load_project_from_excel(), load_vehicle_from_folder()
 ```
 
 ---
@@ -68,8 +69,9 @@ All tests should pass. A warning about negative NPV on a stress-test project is 
 ## End-to-End Runner
 
 ```bash
-python run_e2e.py                         # built-in sample data
-python run_e2e.py --csv examples/         # load from CSV files
+python run_e2e.py                              # built-in sample data
+python run_e2e.py --csv examples/             # load from CSV files
+python run_e2e.py --folder examples/          # folder-per-vehicle Excel/CSV mode
 python run_e2e.py --json examples/portfolio.json
 python run_e2e.py --sims 5000 --seed 42
 ```
@@ -122,15 +124,44 @@ IRR constraint slack and g2 is the loss-probability constraint slack. The
 for Brent's method (sign change is sufficient). If the kink causes issues,
 consider sequential constraint evaluation or a smooth LogSumExp surrogate.
 
-### 5. IRR sentinels
+### 5. Project cashflow simulation modes
+
+Two mutually exclusive modes; **never mix them for the same project**:
+
+| Mode | Trigger | Shock application |
+|---|---|---|
+| **Revenue/cost** | `base_revenue` provided | GBM price path × `base_revenue` per period |
+| **Cashflow** | only `base_cashflows` provided | lognormal multiplier applied to positive net-CF periods |
+
+**GBM price path** (revenue/cost mode):
+```
+price_index[s, t] = exp( cumsum( (μ − σ²/2) + σ·ε_t ) )
+revenue[s, t] = base_revenue[t] × price_index[s, t]
+```
+where `μ = price_drift` (or estimated from `price_series`) and `σ = price_vol`.
+This produces a proper log-normal random walk rather than a single i.i.d. scalar multiplier.
+
+**Multi-year capex**: supply `base_cashflows` as a full array including t=0 outflow(s):
+```python
+base_cashflows=[-500_000, -300_000, 0, 180_000, …]  # t=0 and t=1 are construction years
+```
+The simulator uses the array as CF[0..T]; no scalar scaling is applied to negative periods.
+
+### 5a. IRR sentinels
 - `-1.0` → total loss (no positive inflows, capex outflow present)
 - `NaN` → undefined (no investment outflow at t=0) — treated as `-1.0` after cleaning
 - `10.0` → capped (outlier path with >1000% return)
 
 ### 6. Portfolio LP (Rockafellar-Uryasev)
 Variables: `w_v` (allocations), `zeta` (VaR threshold), `u_s` (excess loss auxiliaries).
-Objective: minimise `∑ c_v * w_v` (total catalytic capital deployed).
+Objective: **maximise `∑ (1 − c_v) * w_v`** (commercial capital mobilised).
+Budget constraint: `∑ c_v * w_v ≤ B_cat` (total catalytic budget).
+Optional stability constraint: `∑ w_v ≥ min_deployment` (prevents degenerate all-zero solution).
 Solver preference: CLARABEL → ECOS → SCS (cvxpy auto-selects).
+
+**`marginal_catalytic_efficiency`** on `VehicleResult` reports `(1 − α*) / α*` — the commercial
+capital mobilised per catalytic dollar at the minimum binding point. This equals `leverage_ratio`
+and is the vehicle-level shadow price of the catalytic budget constraint.
 
 ---
 
@@ -149,8 +180,9 @@ Solver preference: CLARABEL → ECOS → SCS (cvxpy auto-selects).
 ## Changing the Optimization Objective
 
 Edit `PortfolioOptimizer._solve_lp()` in `calibration/portfolio/optimizer.py`.
-The current objective is `min ∑ c_v * w_v`. Alternative: maximise `∑(1-c_v)*w_v`
-(commercial capital mobilized) or minimise weighted-average catalytic fraction.
+The current objective is `max ∑(1-c_v)*w_v` (commercial capital mobilised subject to catalytic
+budget `∑c_v*w_v ≤ B_cat`). Alternative: minimise total catalytic cost `min ∑c_v*w_v`, or
+minimise weighted-average catalytic fraction.
 
 ---
 
@@ -166,7 +198,19 @@ The current objective is `min ∑ c_v * w_v`. Alternative: maximise `∑(1-c_v)*
   or (b) add more protective mitigants (higher `guarantee_coverage` or `grant_reserve`).
 
 - **CVaR constraint too tight**: if the portfolio LP returns status `infeasible`, increase
-  `cvar_max` in `PortfolioInputs` or reduce `cvar_confidence`.
+  `cvar_max` in `PortfolioInputs` or reduce `cvar_confidence`. Also check that
+  `min_deployment` is not set too high relative to `total_budget`.
+
+- **All-zero LP allocation**: if the optimizer returns zero weights for all vehicles, set
+  `min_deployment > 0` in `PortfolioInputs` to enforce a minimum total deployment.
 
 - **Correlation matrix not PD**: `cholesky_correlated_draws()` automatically applies Higham's
   nearest-PD projection. Check the warning log if correlations were modified.
+
+- **Mixed cashflow/revenue modes**: do not provide both `base_cashflows` and `base_revenue` for
+  the same project. If `base_revenue` is set, the simulator uses GBM price paths and ignores
+  `base_cashflows` multiplier logic entirely (mode consistency guard).
+
+- **Excel ingestion with revenue/cost columns**: if your Excel sheet has `revenue` and `cost`
+  columns, `load_project_from_excel()` populates `base_revenue` and `base_costs` directly
+  (not `base_cashflows`). Ensure `price_vol` is set in the sheet or passed as a kwarg.

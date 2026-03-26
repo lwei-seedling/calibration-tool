@@ -70,10 +70,20 @@ Run:
 python run_e2e.py --csv examples/
 ```
 
-The simulator scales the supplied cashflows per path using a lognormal multiplier
-(sigma = `price_vol`, default 0.15). Set `price_vol` via JSON for tighter/looser
-volatility. This mode is ideal when you have a financial model that produces an
-explicit year-by-year cashflow forecast.
+The simulator applies a **GBM price path** to the positive cashflow periods
+(`price_index[s,t] = exp(cumsum((μ−σ²/2) + σ·ε_t))`). Set `price_vol` and optionally
+`price_drift` via JSON for tighter/looser volatility. This mode is ideal when you have a
+financial model that produces an explicit year-by-year cashflow forecast.
+
+**Multi-year capex:** include negative cashflows at t=1, t=2, … for construction draw-downs:
+```csv
+year,cashflow
+0,-1000000
+1,-500000
+2,0
+3,180000
+```
+Negative periods are passed through unchanged (GBM multiplier is not applied to outflows).
 
 #### A2. Parametric format (for factor-driven Monte Carlo)
 
@@ -95,11 +105,14 @@ Create one CSV file per vehicle named `projects_vehicle_1.csv`, `projects_vehicl
 
 | Column | Default | Description |
 |---|---|---|
-| `price_vol` | 0.15 | Annual price volatility (lognormal sigma) |
+| `price_vol` | 0.15 | Annual price volatility (GBM σ) |
+| `price_drift` | 0.0 | Annual log-price drift (GBM μ). If omitted and `price_series` not provided, drift = 0 |
 | `yield_vol` | 0.10 | Annual yield volatility |
 | `inflation_rate` | 0.03 | Annual opex inflation |
 | `fx_vol` | 0.05 | Annual FX volatility on revenue |
 | `delay_prob` | 0.05 | Per-period probability of production delay |
+| `revenue` | — | Year-by-year revenue array (t=1..T). If present, also provide `cost`; populates `base_revenue`/`base_costs` instead of `base_cashflows` |
+| `cost` | — | Year-by-year operating cost array (t=1..T). Used with `revenue` column |
 
 **Example** (`examples/projects_vehicle_1.csv`):
 
@@ -135,6 +148,7 @@ A single JSON file specifies the entire portfolio including vehicle-level parame
 | `cvar_max` | float | Maximum portfolio CVaR as loss rate (default 0.30) |
 | `min_expected_return` | float | Minimum expected portfolio return (default 0.0) |
 | `max_allocation_fraction` | float | Max fraction of budget to one vehicle (default 1.0) |
+| `min_deployment` | float | Minimum total capital deployed `∑w_v ≥ min_deployment` (default 0.0; set > 0 to prevent degenerate all-zero LP solution) |
 | `calibrator_config` | object | Calibration constraints (see below) |
 | `vehicles` | array | List of vehicle objects |
 
@@ -160,7 +174,7 @@ A single JSON file specifies the entire portfolio including vehicle-level parame
 | `mezzanine_coupon` | float | Mezzanine annual coupon rate (default 0.12) |
 | `discount_rate` | float | Discount rate for NPV-based loss (default 0.0 = sum-based) |
 | `correlation_matrix` | J×J array | Project-level correlation matrix |
-| `projects` | array | List of project objects (same fields as parametric CSV, plus `base_cashflows`) |
+| `projects` | array | List of project objects (same fields as parametric CSV, plus `base_cashflows`, `base_revenue`, `base_costs`, `price_drift`) |
 
 **Example** (`examples/portfolio.json`):
 
@@ -207,14 +221,29 @@ python run_e2e.py --json examples/portfolio.json --sims 5000 --seed 123
 ## Runner Options
 
 ```
-usage: run_e2e.py [-h] [--csv DIR | --json FILE] [--sims SIMS] [--seed SEED]
+usage: run_e2e.py [-h] [--csv DIR | --json FILE | --folder DIR] [--sims SIMS] [--seed SEED]
 
 optional arguments:
-  --csv DIR      Directory with projects_vehicle_N.csv files
+  --csv DIR      Directory with projects_vehicle_N.csv files (parametric/cashflow CSV)
+  --folder DIR   Folder-per-vehicle mode: each sub-folder is one vehicle; each .xlsx/.csv
+                 file inside is one project (loaded via load_project_from_excel)
   --json FILE    JSON file with full portfolio specification
   --sims SIMS    Number of Monte Carlo simulations (default: 1000)
   --seed SEED    Random seed for reproducibility
 ```
+
+**`--folder` layout:**
+```
+examples/
+├── vehicle_1/
+│   ├── solar_farm.xlsx
+│   └── agroforestry.xlsx
+└── vehicle_2/
+    └── clean_energy.xlsx
+```
+Each Excel file must have a `cashflow` column (or `revenue` + `cost` columns). Vehicle-level
+settings (guarantee, correlation, etc.) default to conservative values unless a
+`vehicle_config.json` is present in the sub-folder.
 
 ---
 
@@ -236,17 +265,18 @@ optional arguments:
 
   Per-Vehicle Breakdown
 ──────────────────────────────────────────────────────────────────────
-                            Allocation $  Alpha  Catalytic $  Commercial $  Leverage
-  East Africa Nature Fund    4,000,000   28.5%    1,140,000     2,860,000     2.5x
-  West Africa Clean Energy   6,000,000   34.3%    2,058,000     3,942,000     1.9x
+                            Allocation $  Alpha  Catalytic $  Commercial $  Leverage  Marg.Eff
+  East Africa Nature Fund    4,000,000   28.5%    1,140,000     2,860,000     2.5x      2.51x
+  West Africa Clean Energy   6,000,000   34.3%    2,058,000     3,942,000     1.9x      1.91x
 ```
 
 **Key metrics:**
 
 - **Alpha (cat %)** — the calibrated catalytic fraction: minimum share of vehicle capital that must be subordinated (first-loss + grant reserve) to meet the investor hurdle IRR and loss probability constraints.
-- **Leverage** — commercial capital mobilized per dollar of catalytic capital. Higher is better.
+- **Leverage** — commercial capital mobilised per dollar of catalytic capital (`(1−α)/α`). Higher is better.
+- **Marg.Eff** — marginal catalytic efficiency: `(1−α*)/α*`, the commercial capital unlocked per additional catalytic dollar at the minimum binding point. Equals leverage at calibrated α*.
 - **CVaR (95%)** — expected portfolio loss rate in the worst 5% of scenarios. Must be below `cvar_max`.
-- **Solver status** — `optimal` means the LP found a feasible allocation. `optimal_inaccurate` is acceptable. `infeasible` means the constraints cannot be jointly satisfied — relax `cvar_max` or `investor_hurdle_irr`.
+- **Solver status** — `optimal` means the LP found a feasible allocation maximising total commercial capital. `optimal_inaccurate` is acceptable. `infeasible` means the constraints cannot be jointly satisfied — relax `cvar_max` or `investor_hurdle_irr`.
 
 ---
 
@@ -386,6 +416,10 @@ The portfolio allocation LP has no feasible solution. Options:
 - Raise `cvar_max` (e.g. from 0.20 to 0.35)
 - Lower `min_expected_return`
 - Raise `max_allocation_fraction` (allow more concentration)
+- Lower `min_deployment` if it was set too high relative to `total_budget`
+
+**LP solver returns all-zero weights**
+No capital is deployed. Set `min_deployment > 0` in `PortfolioInputs` (or `"min_deployment"` in JSON) to enforce a minimum total deployment floor.
 
 **`UserWarning: Base-case lifetime revenue is less than capex`**
 The project has negative expected NPV at base-case assumptions. This is a warning, not an error — the Monte Carlo will still run. Review your `price`, `yield_`, and `lifetime_years` inputs.
