@@ -20,7 +20,19 @@ class PortfolioInputs(BaseModel):
         default_factory=CalibratorConfig,
         description="Calibration constraints applied to each vehicle.",
     )
-    total_budget: float = Field(..., gt=0, description="Total portfolio capital budget.")
+    total_budget: float = Field(..., gt=0, description="Total portfolio capital budget (upper bound on sum of allocations).")
+    catalytic_budget: float | None = Field(
+        None, gt=0,
+        description="Foundation's total catalytic capital budget. When provided, the LP "
+                    "constraint is sum(alpha_v * w_v) <= catalytic_budget (maximize commercial "
+                    "capital mobilized). When None, falls back to sum(w) == total_budget "
+                    "(legacy mode)."
+    )
+    min_deployment: float = Field(
+        0.0, ge=0.0,
+        description="Minimum total capital deployed: sum(w) >= min_deployment. "
+                    "Set > 0 to prevent degenerate all-zero LP solutions. Default 0 (no constraint)."
+    )
     min_allocation: float = Field(
         0.0, ge=0.0, description="Minimum capital allocation to any single vehicle."
     )

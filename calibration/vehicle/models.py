@@ -87,3 +87,13 @@ class VehicleResult:
         if self.catalytic_capital == 0.0:
             return float("inf")
         return self.commercial_capital / self.catalytic_capital
+
+    @property
+    def marginal_catalytic_efficiency(self) -> float:
+        """Commercial capital mobilized per unit of catalytic deployed at minimum feasible alpha.
+
+        Defined as (1 - alpha*) / alpha* — the leverage ratio evaluated at the
+        minimum catalytic fraction required to satisfy investor constraints.
+        Higher values indicate more capital-efficient deployment.
+        """
+        return self.leverage_ratio

@@ -1,7 +1,6 @@
 """Pydantic input models and result dataclasses for the project layer."""
 from __future__ import annotations
 
-import warnings
 from dataclasses import dataclass
 
 import numpy as np
@@ -17,10 +16,15 @@ class ProjectInputs(BaseModel):
     `yield_`, and `lifetime_years`. The simulator builds stochastic cashflows
     from these fundamentals.
 
-    **Cashflow mode**: supply `base_cashflows` (a list of operating-period
-    net cashflows for t=1..T) plus `capex`. The simulator scales these base
-    cashflows with a single lognormal multiplier per path (using `price_vol`
-    as the overall volatility). All parametric revenue/opex fields are ignored.
+    **Cashflow mode**: supply `base_cashflows` as a full-lifecycle array
+    [CF_0, CF_1, ..., CF_T] where CF_0 is the upfront outflow (negative for
+    capex) and CF_1..CF_T are operating cashflows. Multi-year capex
+    (negative values in early periods) is fully supported.
+
+    Optionally, supply `base_revenue` and `base_costs` (per-period, t=1..T)
+    to separate revenue from cost; price shocks are then applied to revenue
+    only via a GBM path. When `base_revenue` is provided, `base_cashflows`
+    must be a length-1 list containing CF[0] (the t=0 outflow).
     """
 
     # ------------------------------------------------------------------ #
@@ -28,8 +32,8 @@ class ProjectInputs(BaseModel):
     # ------------------------------------------------------------------ #
     capex: float | None = Field(
         None, description="Capital expenditure (positive value; sign applied internally). "
-                          "Required in parametric mode. Optional in cashflow mode "
-                          "(defaults to 0 when base_cashflows is provided)."
+                          "Required in parametric mode. Ignored when base_cashflows is provided "
+                          "(capex is embedded as CF[0] of base_cashflows in cashflow mode)."
     )
     opex_annual: float | None = Field(
         None, description="Annual operating expenditure (positive). Ignored in cashflow mode."
@@ -43,7 +47,7 @@ class ProjectInputs(BaseModel):
     lifetime_years: int | None = Field(
         None, ge=1, le=50,
         description="Project lifetime in years. Inferred from base_cashflows length "
-                    "when in cashflow mode."
+                    "when in cashflow mode (lifetime_years = len(base_cashflows) - 1)."
     )
 
     # ------------------------------------------------------------------ #
@@ -51,10 +55,38 @@ class ProjectInputs(BaseModel):
     # ------------------------------------------------------------------ #
     base_cashflows: list[float] | None = Field(
         None,
-        description="Operating-period net cashflows for t=1..T (capex outflow at t=0 "
-                    "is always specified separately via `capex`). When provided, the "
-                    "simulator applies a single lognormal multiplier per path "
-                    "(sigma=price_vol) to scale these base cashflows stochastically."
+        description="Full-lifecycle net cashflows [CF_0, CF_1, ..., CF_T]. "
+                    "CF_0 is typically negative (capex/construction outflow). "
+                    "Multi-year capex is supported: supply negative values for "
+                    "early construction years. When provided, used directly — "
+                    "CF[0] is never overridden. Must have len >= 2 unless "
+                    "base_revenue is also provided (then len == 1 for CF[0] only)."
+    )
+    base_revenue: list[float] | None = Field(
+        None,
+        description="Per-period revenue for t=1..T. When provided together with "
+                    "base_costs, price shocks (GBM path) are applied to revenue only. "
+                    "base_cashflows must be provided with exactly one element (CF[0])."
+    )
+    base_costs: list[float] | None = Field(
+        None,
+        description="Per-period costs for t=1..T (unshocked, pass-through). "
+                    "Used together with base_revenue."
+    )
+
+    # ------------------------------------------------------------------ #
+    # Price process parameters                                            #
+    # ------------------------------------------------------------------ #
+    price_series: list[float] | None = Field(
+        None,
+        description="Historical price observations. Log returns are computed and "
+                    "used to estimate drift (mu) and volatility (sigma) for the GBM "
+                    "price path, overriding price_vol and price_drift."
+    )
+    price_drift: float | None = Field(
+        None,
+        description="Annualised log-price drift for the GBM price path. "
+                    "If None and price_series is not provided, defaults to 0.0."
     )
 
     # ------------------------------------------------------------------ #
@@ -69,7 +101,7 @@ class ProjectInputs(BaseModel):
     price_vol: float = Field(
         0.15, ge=0.0, le=1.0,
         description="Annual price volatility (lognormal sigma). In cashflow mode, "
-                    "used as the overall cashflow multiplier volatility."
+                    "used as the GBM sigma for the price index path."
     )
     yield_vol: float = Field(0.10, ge=0.0, le=1.0, description="Annual yield volatility (lognormal sigma).")
     inflation_rate: float = Field(0.02, ge=0.0, le=0.5, description="Annual inflation rate for opex.")
@@ -99,17 +131,43 @@ class ProjectInputs(BaseModel):
         # ---- Input mode validation -------------------------------------- #
         if self.base_cashflows is not None:
             # Cashflow mode
-            if len(self.base_cashflows) == 0:
-                raise ValueError("base_cashflows must have at least one element.")
-            if self.lifetime_years is None:
-                object.__setattr__(self, "lifetime_years", len(self.base_cashflows))
-            elif self.lifetime_years != len(self.base_cashflows):
-                raise ValueError(
-                    f"lifetime_years={self.lifetime_years} does not match "
-                    f"len(base_cashflows)={len(self.base_cashflows)}."
-                )
-            if self.capex is None:
-                object.__setattr__(self, "capex", 0.0)
+            if self.base_revenue is not None:
+                # Revenue+cost sub-mode: base_cashflows must be exactly [CF0]
+                if len(self.base_cashflows) != 1:
+                    raise ValueError(
+                        "When base_revenue is provided, base_cashflows must contain "
+                        "exactly one element: [CF_0] (the t=0 outflow)."
+                    )
+                T = len(self.base_revenue)
+                if T == 0:
+                    raise ValueError("base_revenue must have at least one element.")
+                if self.base_costs is not None and len(self.base_costs) != T:
+                    raise ValueError(
+                        f"base_costs length {len(self.base_costs)} must match "
+                        f"base_revenue length {T}."
+                    )
+                if self.lifetime_years is None:
+                    object.__setattr__(self, "lifetime_years", T)
+                elif self.lifetime_years != T:
+                    raise ValueError(
+                        f"lifetime_years={self.lifetime_years} does not match "
+                        f"len(base_revenue)={T}."
+                    )
+            else:
+                # Standard cashflow mode: base_cashflows is full lifecycle [CF0, CF1, ..., CFT]
+                if len(self.base_cashflows) < 2:
+                    raise ValueError(
+                        "base_cashflows must have at least 2 elements: "
+                        "[CF_0, CF_1, ..., CF_T] (full lifecycle including t=0)."
+                    )
+                T = len(self.base_cashflows) - 1
+                if self.lifetime_years is None:
+                    object.__setattr__(self, "lifetime_years", T)
+                elif self.lifetime_years != T:
+                    raise ValueError(
+                        f"lifetime_years={self.lifetime_years} does not match "
+                        f"len(base_cashflows)-1={T}."
+                    )
         else:
             # Parametric mode: all core fields required
             missing = [
@@ -120,14 +178,6 @@ class ProjectInputs(BaseModel):
                 raise ValueError(
                     f"Fields required in parametric mode: {missing}. "
                     "Provide base_cashflows to use cashflow-based input instead."
-                )
-            # Economic viability hint
-            base_revenue = self.price * self.yield_ * self.lifetime_years  # type: ignore[operator]
-            if base_revenue < self.capex:  # type: ignore[operator]
-                warnings.warn(
-                    "Base-case lifetime revenue is less than capex — project may have negative expected NPV.",
-                    UserWarning,
-                    stacklevel=2,
                 )
 
         # ---- Delay probs normalisation ---------------------------------- #

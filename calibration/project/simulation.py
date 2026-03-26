@@ -16,13 +16,18 @@ class ProjectSimulator:
     inflation, and delay. Applies a structural delay (delay_years_probs) that
     shifts the revenue start date, followed by the per-period delay_prob.
 
-    **Cashflow mode**: scales a user-supplied `base_cashflows` vector by a
-    single lognormal multiplier per path (sigma=price_vol). Capex is placed
-    at t=0; base_cashflows become t=1..T.
+    **Cashflow mode**: `base_cashflows` is the FULL lifecycle array
+    [CF_0, CF_1, ..., CF_T]. CF_0 is passed through unchanged (deterministic).
+    A GBM price path is applied to positive operating cashflows (t=1..T).
+
+    **Revenue+cost sub-mode**: when `base_revenue` and (optionally) `base_costs`
+    are provided, price shocks via a GBM path are applied to revenue only.
+    `base_cashflows` must be a single-element list [CF_0] for the t=0 outflow.
+    `base_costs` is passed through unshocked.
 
     Cashflow sign convention:
-      t=0: CF = -capex  (investment outflow)
-      t≥1: CF = revenue[t] - opex[t]  (net operating cashflow)
+      t=0: CF = capex outflow (negative)
+      t≥1: CF = net operating cashflow (revenue - cost)
 
     Loss is computed using NPV at `discount_rate` (defaults to 0.0, giving
     sum-based loss for backward compatibility).
@@ -68,28 +73,85 @@ class ProjectSimulator:
     # Cashflow-based simulation path
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _get_price_params(p: ProjectInputs) -> tuple[float, float]:
+        """Return (mu, sigma) for the GBM price process.
+
+        If price_series is provided, mu and sigma are estimated from log returns.
+        Otherwise use price_drift (default 0.0) and price_vol.
+        """
+        if p.price_series is not None:
+            log_returns = np.diff(np.log(np.asarray(p.price_series, dtype=float)))
+            mu = float(np.mean(log_returns))
+            sigma = float(np.std(log_returns))
+        else:
+            mu = p.price_drift if p.price_drift is not None else 0.0
+            sigma = p.price_vol
+        return mu, sigma
+
     def _run_cashflow_mode(
         self,
         rng: np.random.Generator,
         n_sims: int,
         p: ProjectInputs,
     ) -> np.ndarray:
-        """Scale user-supplied base_cashflows with a lognormal multiplier.
+        """Simulate cashflows from base_cashflows (full lifecycle) or base_revenue+costs.
 
-        Each path s receives a scalar multiplier:
-            m[s] ~ LogNormal(mu = -0.5*sigma^2, sigma = price_vol)
-        so that E[m] = 1 and the base cashflows are preserved on average.
+        Item W — MODE GUARD: base_revenue path is mutually exclusive with the
+        base_cashflows multiplier path. No double-shocking.
+
+        Item X — GBM price path: price_index[s, t] = exp(cumsum((mu - σ²/2) + σ*ε_t))
+        producing a proper geometric Brownian motion with drift mu and vol sigma.
         """
-        base = np.asarray(p.base_cashflows, dtype=float)  # (T,)
-        T = len(base)
-        sigma = p.price_vol
+        mu, sigma = self._get_price_params(p)
 
-        shocks = rng.standard_normal(n_sims)
-        multipliers = np.exp(sigma * shocks - 0.5 * sigma ** 2)  # (n_sims,)
+        # ---- Revenue+cost sub-mode (base_revenue provided) ---- #
+        if p.base_revenue is not None:
+            T = len(p.base_revenue)
+            revenue_base = np.asarray(p.base_revenue, dtype=float)   # (T,)
+            cost_base = np.asarray(
+                p.base_costs if p.base_costs is not None else [0.0] * T,
+                dtype=float,
+            )                                                          # (T,)
 
-        cashflows = np.empty((n_sims, T + 1), dtype=float)
-        cashflows[:, 0] = -(p.capex or 0.0)          # t=0: investment outflow
-        cashflows[:, 1:] = base * multipliers[:, None]  # (n_sims, T)
+            if sigma > 0:
+                shocks = rng.standard_normal((n_sims, T))              # (S, T)
+                price_index = np.exp(
+                    np.cumsum((mu - 0.5 * sigma ** 2) + sigma * shocks, axis=1)
+                )                                                      # (S, T)
+                revenue_shocked = revenue_base[np.newaxis, :] * price_index  # (S, T)
+            else:
+                revenue_shocked = np.tile(revenue_base, (n_sims, 1))  # (S, T)
+
+            cashflows = np.empty((n_sims, T + 1), dtype=float)
+            cashflows[:, 0] = p.base_cashflows[0]                     # CF[0] unshocked
+            cashflows[:, 1:] = revenue_shocked - cost_base            # net operating CF
+            return cashflows
+
+        # ---- Full-lifecycle base_cashflows path ---- #
+        # base_cashflows = [CF_0, CF_1, ..., CF_T] — full lifecycle
+        base = np.asarray(p.base_cashflows, dtype=float)              # (T+1,)
+        T = len(base) - 1
+
+        if sigma > 0 and T > 0:
+            # Apply GBM price path only to positive operating cashflows (t=1..T)
+            # CF[0] (capex/construction) is passed through unchanged.
+            pos_mask = base[1:] > 0                                    # (T,) bool mask over operating periods
+            if pos_mask.any():
+                shocks = rng.standard_normal((n_sims, T))              # (S, T)
+                price_index = np.exp(
+                    np.cumsum((mu - 0.5 * sigma ** 2) + sigma * shocks, axis=1)
+                )                                                      # (S, T)
+                cashflows = np.tile(base, (n_sims, 1)).copy()          # (S, T+1)
+                pos_idx = np.where(pos_mask)[0] + 1                   # column indices in cashflows (offset by 1)
+                cashflows[:, pos_idx] = (
+                    base[pos_idx] * price_index[:, pos_mask]
+                )
+            else:
+                cashflows = np.tile(base, (n_sims, 1))
+        else:
+            cashflows = np.tile(base, (n_sims, 1))
+
         return cashflows
 
     # ------------------------------------------------------------------
