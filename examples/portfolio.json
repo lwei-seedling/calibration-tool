@@ -1,0 +1,80 @@
+{
+  "total_budget": 10000000,
+  "n_sims": 1000,
+  "seed": 42,
+  "min_allocation": 0,
+  "max_allocation_fraction": 0.7,
+  "min_expected_return": 0.0,
+  "cvar_confidence": 0.95,
+  "cvar_max": 0.35,
+  "calibrator_config": {
+    "investor_hurdle_irr": 0.07,
+    "max_loss_probability": 0.08,
+    "alpha_lo": 0.0,
+    "alpha_hi": 0.99
+  },
+  "vehicles": [
+    {
+      "name": "East Africa Nature Fund",
+      "total_capital": 4000000,
+      "guarantee_coverage": 0.30,
+      "grant_reserve": 200000,
+      "mezzanine_fraction": 0.10,
+      "senior_coupon": 0.08,
+      "mezzanine_coupon": 0.13,
+      "correlation_matrix": [
+        [1.00, 0.35, 0.20],
+        [0.35, 1.00, 0.40],
+        [0.20, 0.40, 1.00]
+      ],
+      "projects": [
+        {
+          "capex": 2000000, "opex_annual": 80000, "price": 45.0, "yield_": 60000,
+          "lifetime_years": 15, "price_vol": 0.12, "yield_vol": 0.08,
+          "inflation_rate": 0.04, "fx_vol": 0.06, "delay_prob": 0.03
+        },
+        {
+          "capex": 800000, "opex_annual": 35000, "price": 12.0, "yield_": 80000,
+          "lifetime_years": 10, "price_vol": 0.18, "yield_vol": 0.15,
+          "inflation_rate": 0.05, "fx_vol": 0.08, "delay_prob": 0.07
+        },
+        {
+          "capex": 1200000, "opex_annual": 50000, "price": 25.0, "yield_": 55000,
+          "lifetime_years": 12, "price_vol": 0.20, "yield_vol": 0.12,
+          "inflation_rate": 0.04, "fx_vol": 0.10, "delay_prob": 0.05
+        }
+      ]
+    },
+    {
+      "name": "West Africa Clean Energy Fund",
+      "total_capital": 6000000,
+      "guarantee_coverage": 0.25,
+      "grant_reserve": 300000,
+      "mezzanine_fraction": 0.15,
+      "senior_coupon": 0.075,
+      "mezzanine_coupon": 0.12,
+      "correlation_matrix": [
+        [1.00, 0.25, 0.30],
+        [0.25, 1.00, 0.35],
+        [0.30, 0.35, 1.00]
+      ],
+      "projects": [
+        {
+          "capex": 3000000, "opex_annual": 120000, "price": 55.0, "yield_": 70000,
+          "lifetime_years": 20, "price_vol": 0.10, "yield_vol": 0.07,
+          "inflation_rate": 0.03, "fx_vol": 0.07, "delay_prob": 0.02
+        },
+        {
+          "capex": 600000, "opex_annual": 28000, "price": 8.0, "yield_": 100000,
+          "lifetime_years": 8, "price_vol": 0.25, "yield_vol": 0.20,
+          "inflation_rate": 0.05, "fx_vol": 0.09, "delay_prob": 0.10
+        },
+        {
+          "capex": 900000, "opex_annual": 40000, "price": 18.0, "yield_": 65000,
+          "lifetime_years": 12, "price_vol": 0.22, "yield_vol": 0.14,
+          "inflation_rate": 0.04, "fx_vol": 0.11, "delay_prob": 0.06
+        }
+      ]
+    }
+  ]
+}
