@@ -11,6 +11,23 @@ The system models the full hierarchy: **PROJECT → VEHICLE → PORTFOLIO**.
 
 ---
 
+## Key Concepts
+
+If you're new to blended finance, here's the minimum you need to understand the tool's outputs:
+
+| Term | Plain-English meaning |
+|---|---|
+| **Catalytic capital** | Concessional money (grants, first-loss equity, guarantees) that takes the most risk so private investors will join |
+| **α (alpha)** | The share of a vehicle's total capital that must be catalytic. The tool solves for the *minimum* α — never higher than necessary |
+| **Tranche** | A layer of a fund with a defined risk/return priority. Senior = safest, first-loss = riskiest |
+| **Waterfall** | The rule for who gets paid first (cashflow waterfall) and who absorbs losses first (loss waterfall) |
+| **IRR** | Internal Rate of Return — the annualised yield an investor earns |
+| **CVaR (95%)** | Expected loss rate across the worst 5% of Monte Carlo scenarios — the portfolio's tail risk |
+| **Leverage ratio** | Commercial capital mobilised per catalytic dollar: `(1−α)/α`. A 3x ratio means $3 private for every $1 concessional |
+| **Vehicle** | A blended-finance fund pooling several projects; has its own tranche structure and calibrated α |
+
+---
+
 ## Quick Start
 
 ### 1. Install
@@ -33,7 +50,7 @@ This runs a two-vehicle, six-project portfolio (East Africa Nature Fund + West A
 pytest
 ```
 
-All 23 tests should pass in under 5 seconds.
+All tests should pass in under 10 seconds.
 
 ---
 
@@ -41,7 +58,9 @@ All 23 tests should pass in under 5 seconds.
 
 ### Option A — CSV files
 
-Two CSV sub-formats are supported and **auto-detected** per file.
+Two CSV sub-formats are supported and **auto-detected** by column names:
+- If the file has a `cashflow` column → **A1 (cashflow-based)**
+- If the file has `capex`, `price`, `yield_` columns → **A2 (parametric)**
 
 #### A1. Cashflow-based format (recommended for detailed forecasts)
 
@@ -113,6 +132,7 @@ Create one CSV file per vehicle named `projects_vehicle_1.csv`, `projects_vehicl
 | `delay_prob` | 0.05 | Per-period probability of production delay |
 | `revenue` | — | Year-by-year revenue array (t=1..T). If present, also provide `cost`; populates `base_revenue`/`base_costs` instead of `base_cashflows` |
 | `cost` | — | Year-by-year operating cost array (t=1..T). Used with `revenue` column |
+| `price_series` | — | Historical price time-series (list of floats). If provided, μ and σ for the GBM are estimated from log-returns of this series, overriding `price_drift` and `price_vol` |
 
 **Example** (`examples/projects_vehicle_1.csv`):
 
@@ -196,11 +216,14 @@ A single JSON file specifies the entire portfolio including vehicle-level parame
       "mezzanine_fraction": 0.10,
       "senior_coupon": 0.08,
       "mezzanine_coupon": 0.13,
-      "correlation_matrix": [[1.0, 0.35, 0.20], [0.35, 1.0, 0.40], [0.20, 0.40, 1.0]],
+      "correlation_matrix": [[1.0, 0.35], [0.35, 1.0]],
       "projects": [
         {"capex": 2000000, "opex_annual": 80000, "price": 45.0, "yield_": 60000,
          "lifetime_years": 15, "price_vol": 0.12, "yield_vol": 0.08,
-         "inflation_rate": 0.04, "fx_vol": 0.06, "delay_prob": 0.03}
+         "inflation_rate": 0.04, "fx_vol": 0.06, "delay_prob": 0.03},
+        {"capex": 800000, "opex_annual": 35000, "price": 12.0, "yield_": 80000,
+         "lifetime_years": 10, "price_vol": 0.18, "yield_vol": 0.15,
+         "inflation_rate": 0.05, "fx_vol": 0.08, "delay_prob": 0.07}
       ]
     }
   ]
@@ -377,7 +400,17 @@ portfolio_inputs = PortfolioInputs(
     seed=42,
 )
 result = PortfolioOptimizer(portfolio_inputs).run()
-print(f"Leverage ratio: {result.leverage_ratio:.2f}x")
+print(f"Solver status:    {result.status}")
+print(f"Leverage ratio:   {result.leverage_ratio:.2f}x")
+print(f"CVaR (95%):       {result.cvar_95:.1%}")
+# Per-vehicle breakdown (keyed by vehicle index)
+for v_idx, alloc in result.allocations.items():
+    alpha = result.catalytic_fractions[v_idx]
+    marg  = result.marginal_catalytic_efficiency[v_idx]
+    print(f"  Vehicle {v_idx}: ${alloc:,.0f} total, α={alpha:.1%}, marg.eff={marg:.2f}x")
+# Full distributions for further analysis
+# result.portfolio_irr_distribution  → np.ndarray shape (n_sims,)
+# result.portfolio_loss_distribution → np.ndarray shape (n_sims,)
 ```
 
 ---
@@ -397,7 +430,7 @@ calibration-tool/
 │   ├── vehicle/                # Dual waterfall + catalytic calibration
 │   ├── portfolio/              # LP portfolio optimizer
 │   └── utils/                  # IRR computation, stats, Cholesky draws
-└── tests/                      # 23 pytest tests
+└── tests/                      # pytest suite (project / vehicle / portfolio layers)
 ```
 
 ---
