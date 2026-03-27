@@ -21,10 +21,11 @@ class ProjectInputs(BaseModel):
     capex) and CF_1..CF_T are operating cashflows. Multi-year capex
     (negative values in early periods) is fully supported.
 
-    Optionally, supply `base_revenue` and `base_costs` (per-period, t=1..T)
-    to separate revenue from cost; price shocks are then applied to revenue
-    only via a GBM path. When `base_revenue` is provided, `base_cashflows`
-    must be a length-1 list containing CF[0] (the t=0 outflow).
+    Optionally, supply `base_revenue` and `base_costs` (per-period, operating
+    years only) to separate revenue from cost; GBM price shocks are then applied
+    to revenue only. When `base_revenue` is provided, `base_cashflows` must
+    contain ALL construction CFs [CF_0, ..., CF_{k-1}] (length k >= 1,
+    typically all negative). `lifetime_years` = k + len(base_revenue) - 1.
     """
 
     # ------------------------------------------------------------------ #
@@ -132,11 +133,15 @@ class ProjectInputs(BaseModel):
         if self.base_cashflows is not None:
             # Cashflow mode
             if self.base_revenue is not None:
-                # Revenue+cost sub-mode: base_cashflows must be exactly [CF0]
-                if len(self.base_cashflows) != 1:
+                # Revenue+cost sub-mode with optional multi-year construction.
+                # base_cashflows = construction CFs [CF_0, ..., CF_{k-1}], k >= 1.
+                # base_revenue   = operating revenue for T periods.
+                # lifetime_years = k + T - 1 (total periods minus 1).
+                k = len(self.base_cashflows)
+                if k < 1:
                     raise ValueError(
                         "When base_revenue is provided, base_cashflows must contain "
-                        "exactly one element: [CF_0] (the t=0 outflow)."
+                        "at least one element (the t=0 construction outflow)."
                     )
                 T = len(self.base_revenue)
                 if T == 0:
@@ -146,12 +151,13 @@ class ProjectInputs(BaseModel):
                         f"base_costs length {len(self.base_costs)} must match "
                         f"base_revenue length {T}."
                     )
+                computed_lifetime = k + T - 1
                 if self.lifetime_years is None:
-                    object.__setattr__(self, "lifetime_years", T)
-                elif self.lifetime_years != T:
+                    object.__setattr__(self, "lifetime_years", computed_lifetime)
+                elif self.lifetime_years != computed_lifetime:
                     raise ValueError(
                         f"lifetime_years={self.lifetime_years} does not match "
-                        f"len(base_revenue)={T}."
+                        f"len(base_cashflows) + len(base_revenue) - 1 = {computed_lifetime}."
                     )
             else:
                 # Standard cashflow mode: base_cashflows is full lifecycle [CF0, CF1, ..., CFT]

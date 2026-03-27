@@ -106,9 +106,13 @@ class ProjectSimulator:
         mu, sigma = self._get_price_params(p)
 
         # ---- Revenue+cost sub-mode (base_revenue provided) ---- #
+        # base_cashflows = construction CFs [CF_0, ..., CF_{k-1}], k >= 1
+        # base_revenue   = operating revenue [Rev_k, ..., Rev_{k+T-1}], T periods
+        # cashflows shape = (S, k + T)
         if p.base_revenue is not None:
-            T = len(p.base_revenue)
-            revenue_base = np.asarray(p.base_revenue, dtype=float)   # (T,)
+            k = len(p.base_cashflows)                                  # construction periods
+            T = len(p.base_revenue)                                    # operating periods
+            revenue_base = np.asarray(p.base_revenue, dtype=float)    # (T,)
             cost_base = np.asarray(
                 p.base_costs if p.base_costs is not None else [0.0] * T,
                 dtype=float,
@@ -123,9 +127,11 @@ class ProjectSimulator:
             else:
                 revenue_shocked = np.tile(revenue_base, (n_sims, 1))  # (S, T)
 
-            cashflows = np.empty((n_sims, T + 1), dtype=float)
-            cashflows[:, 0] = p.base_cashflows[0]                     # CF[0] unshocked
-            cashflows[:, 1:] = revenue_shocked - cost_base            # net operating CF
+            cashflows = np.empty((n_sims, k + T), dtype=float)
+            # Construction phase: deterministic (all k construction periods)
+            cashflows[:, :k] = np.asarray(p.base_cashflows, dtype=float)[np.newaxis, :]
+            # Operating phase: GBM on revenue, deterministic costs
+            cashflows[:, k:] = revenue_shocked - cost_base
             return cashflows
 
         # ---- Full-lifecycle base_cashflows path ---- #

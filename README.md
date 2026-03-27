@@ -264,52 +264,95 @@ examples/folder/
 - Glob pattern: `examples/folder/**/*.csv` (or `*.xlsx`).
 - Files are loaded in alphabetical order within each vehicle folder.
 
+#### File mask
+
+```
+<vehicle_folder>/
+├── project_<name>.csv        ← project data  (prefix "project_" required)
+└── price_<commodity>.csv     ← price series  (prefix "price_",  optional)
+```
+
+The `project_` prefix distinguishes project files from price files in the same folder.
+One price file can be shared by multiple projects in the same vehicle.
+
 #### Column format
 
 | Column | Required | Description |
 |---|---|---|
-| `Year` | Yes | Calendar year (integer). Determines `lifetime_years` and period ordering. |
-| `Yield` | Yes* | Revenue or output value per year ($). Zero during construction. |
-| `Capex` | Yes* | Capital expenditure per year ($). Zero during operations. |
-| `Opex` | Yes* | Operating cost per year ($). May be non-zero during construction. |
+| `Year` | Yes | Calendar year (e.g. 2025). Used for ordering; construction vs operating rows are inferred from `Yield == 0`. |
+| `Yield` | Yes | Physical output per year (tons, m³, kWh, etc.). Zero during construction years. |
+| `Capex` | Yes | Capital expenditure per year ($). Zero during operating years. |
+| `Opex` | Yes | Operating cost per year ($). May be non-zero during construction. |
+| `Project_Lifetime` | Recommended | Total rows in file (validation only). Warning if mismatch. |
 
-*Alternatively use `Revenue`/`Cost`/`Capex`, or a single pre-computed `Cashflow` column.
-`Yield` is treated as revenue; `Opex` as cost. Net cashflow per period = `Yield − Opex − Capex`.
+**Price columns — Option 1 (embedded, all prices in USD):**
 
-> Negative periods (construction) are passed to the simulator unchanged — the GBM multiplier
-> is **not** applied to outflows. Only positive operating cashflow periods are stochastically shocked.
+| Column | Description |
+|---|---|
+| `Base_Price` | Current price per unit (e.g. `20.0` for $20/ton carbon). Revenue = `Yield × Base_Price × GBM_path`. |
+| `Price_Growth_Rate` | Annual log-price drift μ (e.g. `0.03` = 3%). |
+| `Price_Vol` | Annual price volatility σ (e.g. `0.20` = 20%). |
 
-#### Worked example — single project
+**Price columns — Option 2 (external price series):**
+
+| Column | Description |
+|---|---|
+| `Price_File` | Name of price series CSV in the same folder, without extension and without `price_` prefix (e.g. `carbon_credits` → loads `price_carbon_credits.csv`). `base_price`, μ and σ are derived from that file. |
+
+**Price series format** (`price_<commodity>.csv`):
+
+| Column | Description |
+|---|---|
+| `Date` | Observation date (any parseable format: `M/D/YYYY`, `YYYY-MM-DD`, etc.). |
+| `Price` | Observed price per unit. |
+
+The loader auto-detects frequency (monthly ≤ 35 days avg → ×12 for drift, ×√12 for vol; quarterly ≤ 100 days; annual otherwise). `base_price` = last observation.
+
+> **GBM is applied to revenue only** (not net cashflow). Construction rows (Yield == 0) are passed through as deterministic outflows. This is the financially correct treatment: Opex is cost certainty, price uncertainty affects only the revenue line.
+
+#### Worked example — Option 1 (embedded price params)
 
 ```csv
-Year,Yield,Capex,Opex
-2025,0,500000,100000
-2026,0,300000,100000
-2027,0,100000,100000
-2028,0,0,100000
-2029,500000,0,100000
+Year,Yield,Capex,Opex,Project_Lifetime,Base_Price,Price_Growth_Rate,Price_Vol
+2025,0,500000,100000,21,20.0,0.03,0.20
+2026,0,300000,100000,21,20.0,0.03,0.20
+2027,0,100000,100000,21,20.0,0.03,0.20
+2028,0,0,100000,21,20.0,0.03,0.20
+2029,25000,0,100000,21,20.0,0.03,0.20
 ...
-2045,500000,0,100000
+2045,25000,0,100000,21,20.0,0.03,0.20
 ```
 
-Net cashflows implied: `−600k, −400k, −200k, −100k, +400k × 17 years`
+`Yield = 25,000 tons/yr × $20/ton = $500k/yr revenue`. Construction CFs = `−600k, −400k, −200k, −100k` (deterministic). Operating revenue shocked by GBM.
+
+#### Worked example — Option 2 (external price series)
+
+```csv
+Year,Yield,Capex,Opex,Project_Lifetime,Price_File
+2025,0,500000,100000,21,carbon_credits
+...
+2045,250000,0,100000,21,carbon_credits
+```
+
+The loader reads `price_carbon_credits.csv` from the same folder and derives `base_price` (last price), `annual_drift`, `annual_vol` from its log-returns.
 
 #### Built-in sample data (3 vehicles, 3 projects each)
 
 ```
 examples/folder/
-├── v1_east_africa_solar/
-│   ├── solar_kenya.csv       # 4yr construction, 17yr ops, Yield=$500k/yr
-│   ├── solar_tanzania.csv    # 3yr construction, 15yr ops, Yield=$380k/yr
-│   └── solar_ethiopia.csv    # 2yr construction, 12yr ops, Yield=$250k/yr
-├── v2_west_africa_agri/
-│   ├── agroforestry_ghana.csv   # 3yr construction + yield ramp-up, 12yr full ops
-│   ├── cashcrop_nigeria.csv     # 2yr construction, 13yr ops, Yield=$350k/yr
-│   └── forestry_senegal.csv     # 4yr construction, 22yr ops (long-cycle forestry)
-└── v3_sea_water/
-    ├── water_indonesia.csv   # 3yr construction, 16yr ops, Yield=$550k/yr
-    ├── water_vietnam.csv     # 2yr construction, 14yr ops, Yield=$400k/yr
-    └── water_philippines.csv # 3yr construction, 14yr ops, Yield=$350k/yr
+├── v1_east_africa_solar/                  ← Option 2: external price series
+│   ├── project_solar_kenya.csv            # 4yr constr, 17yr ops, 250k units/yr
+│   ├── project_solar_tanzania.csv         # 3yr constr, 15yr ops, 191k units/yr
+│   ├── project_solar_ethiopia.csv         # 2yr constr, 12yr ops, 125k units/yr
+│   └── price_carbon_credits.csv           # 60 monthly obs, base=$1.99, σ=16.9%/yr
+├── v2_west_africa_agri/                   ← Option 1: Base_Price=$20, Growth=3%, Vol=20%
+│   ├── project_agroforestry_ghana.csv     # 3yr constr + ramp-up, 13yr full ops
+│   ├── project_cashcrop_nigeria.csv       # 2yr constr, 13yr ops, 17.5k tons/yr
+│   └── project_forestry_senegal.csv       # 4yr constr + ramp-up, 22yr full ops
+└── v3_sea_water/                          ← Option 1: Base_Price=$0.10/m³, Growth=2%, Vol=12%
+    ├── project_water_indonesia.csv        # 3yr constr, 16yr ops, 5.5M m³/yr
+    ├── project_water_vietnam.csv          # 2yr constr, 14yr ops, 4.0M m³/yr
+    └── project_water_philippines.csv      # 3yr constr, 14yr ops, 3.5M m³/yr
 ```
 
 Run:
