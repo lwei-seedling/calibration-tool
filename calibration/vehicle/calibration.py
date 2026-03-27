@@ -34,6 +34,14 @@ class CatalyticCalibrator:
       median_s { IRR_senior(alpha, s) } >= hurdle_irr
       P_s { loss_senior(alpha, s) > 0 } <= max_loss_prob
 
+    **Vehicle-level risk**: investor constraints (hurdle IRR, max loss probability)
+    are evaluated on the VEHICLE-LEVEL senior tranche, not on individual projects.
+    Individual projects may have negative NPV or high loss probability. What matters
+    is whether the vehicle's waterfall structure (diversification + subordination
+    layers) produces a senior tranche that meets investor thresholds.
+    Catalytic capital is allocated at the vehicle level and absorbed via the capital
+    stack (Grant Reserve → First-Loss → Mezzanine → Guarantee → Senior).
+
     Uses Brent's method when the objective is monotone, falls back to a
     two-phase grid search when it is not (typically due to simulation noise).
 

@@ -11,6 +11,23 @@ The system models the full hierarchy: **PROJECT → VEHICLE → PORTFOLIO**.
 
 ---
 
+## Key Concepts
+
+If you're new to blended finance, here's the minimum you need to understand the tool's outputs:
+
+| Term | Plain-English meaning |
+|---|---|
+| **Catalytic capital** | Concessional money (grants, first-loss equity, guarantees) that takes the most risk so private investors will join |
+| **α (alpha)** | The share of a vehicle's total capital that must be catalytic. The tool solves for the *minimum* α — never higher than necessary |
+| **Tranche** | A layer of a fund with a defined risk/return priority. Senior = safest, first-loss = riskiest |
+| **Waterfall** | The rule for who gets paid first (cashflow waterfall) and who absorbs losses first (loss waterfall) |
+| **IRR** | Internal Rate of Return — the annualised yield an investor earns |
+| **CVaR (95%)** | Expected loss rate across the worst 5% of Monte Carlo scenarios — the portfolio's tail risk |
+| **Leverage ratio** | Commercial capital mobilised per catalytic dollar: `(1−α)/α`. A 3x ratio means $3 private for every $1 concessional |
+| **Vehicle** | A blended-finance fund pooling several projects; has its own tranche structure and calibrated α |
+
+---
+
 ## Quick Start
 
 ### 1. Install
@@ -33,7 +50,7 @@ This runs a two-vehicle, six-project portfolio (East Africa Nature Fund + West A
 pytest
 ```
 
-All 23 tests should pass in under 5 seconds.
+All tests should pass in under 10 seconds.
 
 ---
 
@@ -41,7 +58,9 @@ All 23 tests should pass in under 5 seconds.
 
 ### Option A — CSV files
 
-Two CSV sub-formats are supported and **auto-detected** per file.
+Two CSV sub-formats are supported and **auto-detected** by column names:
+- If the file has a `cashflow` column → **A1 (cashflow-based)**
+- If the file has `capex`, `price`, `yield_` columns → **A2 (parametric)**
 
 #### A1. Cashflow-based format (recommended for detailed forecasts)
 
@@ -70,10 +89,20 @@ Run:
 python run_e2e.py --csv examples/
 ```
 
-The simulator scales the supplied cashflows per path using a lognormal multiplier
-(sigma = `price_vol`, default 0.15). Set `price_vol` via JSON for tighter/looser
-volatility. This mode is ideal when you have a financial model that produces an
-explicit year-by-year cashflow forecast.
+The simulator applies a **GBM price path** to the positive cashflow periods
+(`price_index[s,t] = exp(cumsum((μ−σ²/2) + σ·ε_t))`). Set `price_vol` and optionally
+`price_drift` via JSON for tighter/looser volatility. This mode is ideal when you have a
+financial model that produces an explicit year-by-year cashflow forecast.
+
+**Multi-year capex:** include negative cashflows at t=1, t=2, … for construction draw-downs:
+```csv
+year,cashflow
+0,-1000000
+1,-500000
+2,0
+3,180000
+```
+Negative periods are passed through unchanged (GBM multiplier is not applied to outflows).
 
 #### A2. Parametric format (for factor-driven Monte Carlo)
 
@@ -95,11 +124,15 @@ Create one CSV file per vehicle named `projects_vehicle_1.csv`, `projects_vehicl
 
 | Column | Default | Description |
 |---|---|---|
-| `price_vol` | 0.15 | Annual price volatility (lognormal sigma) |
+| `price_vol` | 0.15 | Annual price volatility (GBM σ) |
+| `price_drift` | 0.0 | Annual log-price drift (GBM μ). If omitted and `price_series` not provided, drift = 0 |
 | `yield_vol` | 0.10 | Annual yield volatility |
 | `inflation_rate` | 0.03 | Annual opex inflation |
 | `fx_vol` | 0.05 | Annual FX volatility on revenue |
 | `delay_prob` | 0.05 | Per-period probability of production delay |
+| `revenue` | — | Year-by-year revenue array (t=1..T). If present, also provide `cost`; populates `base_revenue`/`base_costs` instead of `base_cashflows` |
+| `cost` | — | Year-by-year operating cost array (t=1..T). Used with `revenue` column |
+| `price_series` | — | Historical price time-series (list of floats). If provided, μ and σ for the GBM are estimated from log-returns of this series, overriding `price_drift` and `price_vol` |
 
 **Example** (`examples/projects_vehicle_1.csv`):
 
@@ -135,6 +168,7 @@ A single JSON file specifies the entire portfolio including vehicle-level parame
 | `cvar_max` | float | Maximum portfolio CVaR as loss rate (default 0.30) |
 | `min_expected_return` | float | Minimum expected portfolio return (default 0.0) |
 | `max_allocation_fraction` | float | Max fraction of budget to one vehicle (default 1.0) |
+| `min_deployment` | float | Minimum total capital deployed `∑w_v ≥ min_deployment` (default 0.0; set > 0 to prevent degenerate all-zero LP solution) |
 | `calibrator_config` | object | Calibration constraints (see below) |
 | `vehicles` | array | List of vehicle objects |
 
@@ -160,7 +194,7 @@ A single JSON file specifies the entire portfolio including vehicle-level parame
 | `mezzanine_coupon` | float | Mezzanine annual coupon rate (default 0.12) |
 | `discount_rate` | float | Discount rate for NPV-based loss (default 0.0 = sum-based) |
 | `correlation_matrix` | J×J array | Project-level correlation matrix |
-| `projects` | array | List of project objects (same fields as parametric CSV, plus `base_cashflows`) |
+| `projects` | array | List of project objects (same fields as parametric CSV, plus `base_cashflows`, `base_revenue`, `base_costs`, `price_drift`) |
 
 **Example** (`examples/portfolio.json`):
 
@@ -182,11 +216,14 @@ A single JSON file specifies the entire portfolio including vehicle-level parame
       "mezzanine_fraction": 0.10,
       "senior_coupon": 0.08,
       "mezzanine_coupon": 0.13,
-      "correlation_matrix": [[1.0, 0.35, 0.20], [0.35, 1.0, 0.40], [0.20, 0.40, 1.0]],
+      "correlation_matrix": [[1.0, 0.35], [0.35, 1.0]],
       "projects": [
         {"capex": 2000000, "opex_annual": 80000, "price": 45.0, "yield_": 60000,
          "lifetime_years": 15, "price_vol": 0.12, "yield_vol": 0.08,
-         "inflation_rate": 0.04, "fx_vol": 0.06, "delay_prob": 0.03}
+         "inflation_rate": 0.04, "fx_vol": 0.06, "delay_prob": 0.03},
+        {"capex": 800000, "opex_annual": 35000, "price": 12.0, "yield_": 80000,
+         "lifetime_years": 10, "price_vol": 0.18, "yield_vol": 0.15,
+         "inflation_rate": 0.05, "fx_vol": 0.08, "delay_prob": 0.07}
       ]
     }
   ]
@@ -204,17 +241,196 @@ python run_e2e.py --json examples/portfolio.json --sims 5000 --seed 123
 
 ---
 
+### Option C — Folder-per-vehicle with Year/Yield/Capex/Opex files
+
+This is the recommended format when you have project financial models with explicit
+year-by-year construction and operating cashflows. Each vehicle is a sub-folder;
+each `.csv` (or `.xlsx`) file inside it is one project.
+
+#### File mask
+
+```
+examples/folder/
+├── <vehicle_name>/
+│   ├── <project_name>.csv
+│   ├── <project_name>.csv
+│   └── <project_name>.csv
+└── <vehicle_name>/
+    └── ...
+```
+
+- The **folder name** becomes the vehicle display name.
+- The **file name** (without extension) becomes the project display name.
+- Glob pattern: `examples/folder/**/*.csv` (or `*.xlsx`).
+- Files are loaded in alphabetical order within each vehicle folder.
+
+#### File mask
+
+```
+<vehicle_folder>/
+├── project_<name>.csv        ← project data  (prefix "project_" required)
+└── price_<commodity>.csv     ← price series  (prefix "price_",  optional)
+```
+
+The `project_` prefix distinguishes project files from price files in the same folder.
+One price file can be shared by multiple projects in the same vehicle.
+
+#### Column format
+
+| Column | Required | Description |
+|---|---|---|
+| `Year` | Yes | Calendar year (e.g. 2025). Used for ordering; construction vs operating rows are inferred from `Yield == 0`. |
+| `Yield` | Yes | Physical output per year (tons, m³, kWh, etc.). Zero during construction years. |
+| `Capex` | Yes | Capital expenditure per year ($). Zero during operating years. |
+| `Opex` | Yes | Operating cost per year ($). May be non-zero during construction. |
+| `Project_Lifetime` | Recommended | Total rows in file (validation only). Warning if mismatch. |
+
+**Price columns — Option 1 (embedded, all prices in USD):**
+
+| Column | Description |
+|---|---|
+| `Base_Price` | Current price per unit (e.g. `20.0` for $20/ton carbon). Revenue = `Yield × Base_Price × GBM_path`. |
+| `Price_Growth_Rate` | Annual log-price drift μ (e.g. `0.03` = 3%). |
+| `Price_Vol` | Annual price volatility σ (e.g. `0.20` = 20%). |
+
+**Price columns — Option 2 (external price series):**
+
+| Column | Description |
+|---|---|
+| `Price_File` | Name of price series CSV in the same folder, without extension and without `price_` prefix (e.g. `carbon_credits` → loads `price_carbon_credits.csv`). `base_price`, μ and σ are derived from that file. |
+
+**Price series format** (`price_<commodity>.csv`):
+
+| Column | Description |
+|---|---|
+| `Date` | Observation date (any parseable format: `M/D/YYYY`, `YYYY-MM-DD`, etc.). |
+| `Price` | Observed price per unit. |
+
+The loader auto-detects frequency (monthly ≤ 35 days avg → ×12 for drift, ×√12 for vol; quarterly ≤ 100 days; annual otherwise). `base_price` = last observation.
+
+> **GBM is applied to revenue only** (not net cashflow). Construction rows (Yield == 0) are passed through as deterministic outflows. This is the financially correct treatment: Opex is cost certainty, price uncertainty affects only the revenue line.
+
+#### Worked example — Option 1 (embedded price params)
+
+```csv
+Year,Yield,Capex,Opex,Project_Lifetime,Base_Price,Price_Growth_Rate,Price_Vol
+2025,0,500000,100000,21,20.0,0.03,0.20
+2026,0,300000,100000,21,20.0,0.03,0.20
+2027,0,100000,100000,21,20.0,0.03,0.20
+2028,0,0,100000,21,20.0,0.03,0.20
+2029,25000,0,100000,21,20.0,0.03,0.20
+...
+2045,25000,0,100000,21,20.0,0.03,0.20
+```
+
+`Yield = 25,000 tons/yr × $20/ton = $500k/yr revenue`. Construction CFs = `−600k, −400k, −200k, −100k` (deterministic). Operating revenue shocked by GBM.
+
+#### Worked example — Option 2 (external price series)
+
+```csv
+Year,Yield,Capex,Opex,Project_Lifetime,Price_File
+2025,0,500000,100000,21,carbon_credits
+...
+2045,250000,0,100000,21,carbon_credits
+```
+
+The loader reads `price_carbon_credits.csv` from the same folder and derives `base_price` (last price), `annual_drift`, `annual_vol` from its log-returns.
+
+#### Built-in sample data (3 vehicles, 3 projects each)
+
+```
+examples/folder/
+├── v1_east_africa_solar/                  ← Option 2: external price series
+│   ├── project_solar_kenya.csv            # 4yr constr, 17yr ops, 250k units/yr
+│   ├── project_solar_tanzania.csv         # 3yr constr, 15yr ops, 191k units/yr
+│   ├── project_solar_ethiopia.csv         # 2yr constr, 12yr ops, 125k units/yr
+│   └── price_carbon_credits.csv           # 60 monthly obs, base=$1.99, σ=16.9%/yr
+├── v2_west_africa_agri/                   ← Option 1: Base_Price=$20, Growth=3%, Vol=20%
+│   ├── project_agroforestry_ghana.csv     # 3yr constr + ramp-up, 13yr full ops
+│   ├── project_cashcrop_nigeria.csv       # 2yr constr, 13yr ops, 17.5k tons/yr
+│   └── project_forestry_senegal.csv       # 4yr constr + ramp-up, 22yr full ops
+└── v3_sea_water/                          ← Option 1: Base_Price=$0.10/m³, Growth=2%, Vol=12%
+    ├── project_water_indonesia.csv        # 3yr constr, 16yr ops, 5.5M m³/yr
+    ├── project_water_vietnam.csv          # 2yr constr, 14yr ops, 4.0M m³/yr
+    └── project_water_philippines.csv      # 3yr constr, 14yr ops, 3.5M m³/yr
+```
+
+Run:
+```bash
+python run_e2e.py --folder examples/folder/ --sims 1000 --seed 42
+```
+
+#### Key validation points
+
+Before running, verify each project file passes these checks:
+
+| # | Check | Why it matters |
+|---|---|---|
+| 1 | **Year column is present and strictly increasing** (no gaps, no duplicates) | The loader sorts by Year; gaps or duplicates cause incorrect period indices |
+| 2 | **At least one row with Capex > 0** | No investment = no project; loader may infer `capex=0` silently |
+| 3 | **Net CF at t=0 is negative** (`Yield − Opex − Capex < 0` in the first year) | IRR is undefined without an initial outflow; sentinel `-1.0` will be returned for all paths |
+| 4 | **At least one operating year with `Yield − Opex > 0`** | If operating CF is never positive, IRR calibration will always be infeasible |
+| 5 | **Capex and Opex are non-negative** | These are costs; negative values indicate a data entry error |
+| 6 | **Yield = 0 during all construction years** | Non-zero yield during construction mixes capex and revenue, distorting cashflow timing |
+| 7 | **Capex = 0 during all operating years** | Construction capex in operating years inflates the negative cashflow and underestimates IRR |
+| 8 | **Lifetime ≤ 50 years** | `ProjectInputs` enforces a 50-year maximum; files exceeding this will raise a validation error |
+| 9 | **Total operating cashflow > total construction cashflow (absolute)** | `∑(Yield−Opex) > ∑(Capex+Opex_construction)` ensures the project is NPV-positive at 0% discount; failing this means no commercially viable α exists |
+| 10 | **No blank / NaN cells in numeric columns** | Blanks are filled with 0; a blank Capex row in a construction year silently drops that outflow |
+| 11 | **Vehicle folder contains ≥ 1 project file** | An empty vehicle folder raises an error at load time |
+| 12 | **`price_vol` is set** (default 0.15 if omitted) | Controls the width of Monte Carlo spread; very low values (< 0.05) may compress IRR variance and make calibration trivially easy or trivially hard |
+
+**Quick sanity check** (run before `run_e2e.py`):
+```python
+from calibration.utils.loaders import load_project_from_excel
+import numpy as np
+
+p = load_project_from_excel("examples/folder/v1_east_africa_solar/solar_kenya.csv")
+cf = np.array(p.base_cashflows)
+print("t=0 CF (should be negative):", cf[0])
+print("Operating CFs (should be positive):", cf[1:])
+print("Simple NPV at 0% discount:", cf.sum())
+assert cf[0] < 0, "ERROR: no initial outflow"
+assert cf.sum() > 0, "ERROR: project has negative total cashflow"
+```
+
+---
+
 ## Runner Options
 
 ```
-usage: run_e2e.py [-h] [--csv DIR | --json FILE] [--sims SIMS] [--seed SEED]
+usage: run_e2e.py [-h] [--csv DIR | --json FILE | --folder DIR] [--sims SIMS] [--seed SEED]
 
 optional arguments:
-  --csv DIR      Directory with projects_vehicle_N.csv files
+  --csv DIR      Directory with projects_vehicle_N.csv files (parametric/cashflow CSV)
+  --folder DIR   Folder-per-vehicle mode: each sub-folder is one vehicle; each .xlsx/.csv
+                 file inside is one project (loaded via load_project_from_excel)
   --json FILE    JSON file with full portfolio specification
   --sims SIMS    Number of Monte Carlo simulations (default: 1000)
   --seed SEED    Random seed for reproducibility
 ```
+
+**`--folder` layout:**
+```
+examples/
+├── vehicle_1/
+│   ├── solar_farm.xlsx
+│   └── agroforestry.xlsx
+└── vehicle_2/
+    └── clean_energy.xlsx
+```
+Each Excel/CSV file must have a `cashflow` column (or `Year`/`Yield`/`Capex`/`Opex` columns for the new format). Vehicle-level settings (guarantee, correlation, etc.) default to conservative values:
+
+| Setting | Default |
+|---|---|
+| `guarantee_coverage` | 25% of senior notional |
+| `grant_reserve` | 5% of estimated total capital |
+| `mezzanine_fraction` | 10% |
+| `senior_coupon` | 8% |
+| `mezzanine_coupon` | 12% |
+| `correlation_matrix` | 0.30 off-diagonal (moderate positive correlation) |
+| `total_capital` | 1.2× sum of construction capex across all projects |
+
+For full control over these settings, use the `--json` format instead.
 
 ---
 
@@ -236,17 +452,18 @@ optional arguments:
 
   Per-Vehicle Breakdown
 ──────────────────────────────────────────────────────────────────────
-                            Allocation $  Alpha  Catalytic $  Commercial $  Leverage
-  East Africa Nature Fund    4,000,000   28.5%    1,140,000     2,860,000     2.5x
-  West Africa Clean Energy   6,000,000   34.3%    2,058,000     3,942,000     1.9x
+                            Allocation $  Alpha  Catalytic $  Commercial $  Leverage  Marg.Eff
+  East Africa Nature Fund    4,000,000   28.5%    1,140,000     2,860,000     2.5x      2.51x
+  West Africa Clean Energy   6,000,000   34.3%    2,058,000     3,942,000     1.9x      1.91x
 ```
 
 **Key metrics:**
 
 - **Alpha (cat %)** — the calibrated catalytic fraction: minimum share of vehicle capital that must be subordinated (first-loss + grant reserve) to meet the investor hurdle IRR and loss probability constraints.
-- **Leverage** — commercial capital mobilized per dollar of catalytic capital. Higher is better.
+- **Leverage** — commercial capital mobilised per dollar of catalytic capital (`(1−α)/α`). Higher is better.
+- **Marg.Eff** — marginal catalytic efficiency: `(1−α*)/α*`, the commercial capital unlocked per additional catalytic dollar at the minimum binding point. Equals leverage at calibrated α*.
 - **CVaR (95%)** — expected portfolio loss rate in the worst 5% of scenarios. Must be below `cvar_max`.
-- **Solver status** — `optimal` means the LP found a feasible allocation. `optimal_inaccurate` is acceptable. `infeasible` means the constraints cannot be jointly satisfied — relax `cvar_max` or `investor_hurdle_irr`.
+- **Solver status** — `optimal` means the LP found a feasible allocation maximising total commercial capital. `optimal_inaccurate` is acceptable. `infeasible` means the constraints cannot be jointly satisfied — relax `cvar_max` or `investor_hurdle_irr`.
 
 ---
 
@@ -347,7 +564,17 @@ portfolio_inputs = PortfolioInputs(
     seed=42,
 )
 result = PortfolioOptimizer(portfolio_inputs).run()
-print(f"Leverage ratio: {result.leverage_ratio:.2f}x")
+print(f"Solver status:    {result.status}")
+print(f"Leverage ratio:   {result.leverage_ratio:.2f}x")
+print(f"CVaR (95%):       {result.cvar_95:.1%}")
+# Per-vehicle breakdown (keyed by vehicle index)
+for v_idx, alloc in result.allocations.items():
+    alpha = result.catalytic_fractions[v_idx]
+    marg  = result.marginal_catalytic_efficiency[v_idx]
+    print(f"  Vehicle {v_idx}: ${alloc:,.0f} total, α={alpha:.1%}, marg.eff={marg:.2f}x")
+# Full distributions for further analysis
+# result.portfolio_irr_distribution  → np.ndarray shape (n_sims,)
+# result.portfolio_loss_distribution → np.ndarray shape (n_sims,)
 ```
 
 ---
@@ -359,15 +586,20 @@ calibration-tool/
 ├── pyproject.toml              # dependencies and build config
 ├── run_e2e.py                  # end-to-end runner (CLI)
 ├── examples/
-│   ├── projects_vehicle_1.csv  # sample: East Africa projects
-│   ├── projects_vehicle_2.csv  # sample: West Africa projects
-│   └── portfolio.json          # sample: full JSON spec
+│   ├── projects_vehicle_1.csv  # sample: parametric CSV (Option A2)
+│   ├── projects_vehicle_2.csv  # sample: parametric CSV (Option A2)
+│   ├── cashflow_vehicle.csv    # sample: cashflow CSV (Option A1)
+│   ├── portfolio.json          # sample: full JSON spec (Option B)
+│   └── folder/                 # sample: folder-per-vehicle (Option C)
+│       ├── v1_east_africa_solar/   (3 projects)
+│       ├── v2_west_africa_agri/    (3 projects)
+│       └── v3_sea_water/           (3 projects)
 ├── calibration/
 │   ├── project/                # Monte Carlo project simulation
 │   ├── vehicle/                # Dual waterfall + catalytic calibration
 │   ├── portfolio/              # LP portfolio optimizer
 │   └── utils/                  # IRR computation, stats, Cholesky draws
-└── tests/                      # 23 pytest tests
+└── tests/                      # pytest suite (project / vehicle / portfolio layers)
 ```
 
 ---
@@ -386,6 +618,13 @@ The portfolio allocation LP has no feasible solution. Options:
 - Raise `cvar_max` (e.g. from 0.20 to 0.35)
 - Lower `min_expected_return`
 - Raise `max_allocation_fraction` (allow more concentration)
+- Lower `min_deployment` if it was set too high relative to `total_budget`
+
+**LP solver returns all-zero weights**
+No capital is deployed. Set `min_deployment > 0` in `PortfolioInputs` (or `"min_deployment"` in JSON) to enforce a minimum total deployment floor.
+
+**`RuntimeWarning: overflow encountered in power / multiply`**
+Harmless. Newton's method for IRR evaluation hits overflow on high-return outlier paths. The sentinel cap (`10.0` = 1000% IRR) is applied by `clean_irr()` afterwards. Results are unaffected.
 
 **`UserWarning: Base-case lifetime revenue is less than capex`**
 The project has negative expected NPV at base-case assumptions. This is a warning, not an error — the Monte Carlo will still run. Review your `price`, `yield_`, and `lifetime_years` inputs.

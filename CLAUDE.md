@@ -10,7 +10,28 @@ for commercial capital. The hierarchy is:
 PROJECT → VEHICLE → PORTFOLIO
 ```
 
-Catalytic capital is **never an input** — it is solved by calibration.
+| Entity | Concrete meaning | Code entry point |
+|---|---|---|
+| **Project** | A single real-world investment (e.g. a solar farm). Has revenue, costs, and risk parameters. | `ProjectInputs`, `ProjectSimulator` |
+| **Vehicle** | A blended-finance fund that pools several projects and splits returns across investor tranches (senior, mezzanine, first-loss). | `VehicleInputs`, `CatalyticCalibrator` |
+| **Portfolio** | A foundation's allocation across multiple vehicles. The LP decides how much to invest in each. | `PortfolioInputs`, `PortfolioOptimizer` |
+
+**α (alpha)** — the catalytic fraction: what share of a vehicle's total capital must be
+concessional (first-loss + grants) so that commercial senior lenders meet their return
+and risk targets. **Catalytic capital is never an input** — it is solved by calibration.
+
+### Finance term glossary
+
+| Term | Meaning |
+|---|---|
+| **Blended finance** | Structures that use concessional (donor/DFI) capital to de-risk returns for private investors |
+| **DFI** | Development Finance Institution (e.g. DFC, MIGA, GuarantCo) — providers of guarantees and subordinated capital |
+| **First-loss tranche** | Capital that absorbs losses first; accepts high risk in exchange for unlocking senior lending |
+| **Guarantee** | A DFI commitment to cover a fraction of senior losses if they occur |
+| **IRR** | Internal Rate of Return — the discount rate that makes NPV of cashflows = 0; the investor's yield |
+| **CVaR** | Conditional Value at Risk — the expected loss rate in the worst X% of scenarios (tail risk measure) |
+| **GBM** | Geometric Brownian Motion — a log-normal random walk used to model price evolution over time |
+| **Waterfall** | The contractual priority order in which investors receive cashflows or absorb losses |
 
 ---
 
@@ -31,8 +52,34 @@ calibration/
 │   └── optimizer.py   # PortfolioOptimizer: full pipeline + cvxpy LP
 └── utils/
     ├── irr.py         # batch_irr(), clean_irr() with edge-case sentinels
-    └── stats.py       # var(), cvar(), cholesky_correlated_draws()
+    ├── stats.py       # var(), cvar(), cholesky_correlated_draws()
+    └── loaders.py     # load_project_from_excel(), load_price_series()
 ```
+
+---
+
+## Data Flow
+
+```
+ProjectInputs (risk params)
+        │
+        ▼
+ProjectSimulator.run()        ← Monte Carlo: draws GBM/lognormal shocks per period
+        │  cashflows[n_sims, T]
+        ▼
+CatalyticCalibrator.calibrate()   ← binary-searches α so senior IRR ≥ hurdle
+        │  alpha* (scalar)             and loss_prob ≤ threshold
+        │  VehicleResult
+        ▼
+PortfolioOptimizer.run()      ← LP: maximise commercial capital subject to
+        │  PortfolioResult         catalytic budget and CVaR constraints
+        ▼
+      Output (allocations, leverage, CVaR)
+```
+
+Each layer is independent — `PortfolioOptimizer` only sees `VehicleResult` objects and
+does not know how cashflows were generated. `ProjectSimulator` does not know about
+tranches or waterfalls.
 
 ---
 
@@ -68,13 +115,19 @@ All tests should pass. A warning about negative NPV on a stress-test project is 
 ## End-to-End Runner
 
 ```bash
-python run_e2e.py                         # built-in sample data
-python run_e2e.py --csv examples/         # load from CSV files
+python run_e2e.py                              # built-in sample data
+python run_e2e.py --csv examples/             # load from CSV files
+python run_e2e.py --folder examples/          # folder-per-vehicle Excel/CSV mode
 python run_e2e.py --json examples/portfolio.json
 python run_e2e.py --sims 5000 --seed 42
 ```
 
 See `README.md` for CSV/JSON format specifications.
+
+**Folder mode file rules** (loaded by `_load_folder_inputs` in `run_e2e.py`):
+- `project_*.csv` / `*.xlsx` → loaded as project data via `load_project_from_excel()`
+- `price_*.csv` → price series; referenced by project files via `Price_File` column, **not** loaded directly
+- Other `.csv` files → treated as legacy cashflow or parametric format
 
 ---
 
@@ -91,11 +144,17 @@ The guarantee is **not** a sequential layer before first-loss. It is applied to
 practice (MIGA, DFC, GuarantCo guarantee senior noteholders, not catalytic capital).
 
 ### 2. Dual waterfall basis
-- **Loss waterfall** operates on **NPV-based terminal loss**
-  `L[s] = max(0, -NPV(CF[s], discount_rate))` where `discount_rate` defaults
-  to 0.0 (undiscounted, backward-compatible). Set `discount_rate > 0` on
-  `VehicleInputs` to enable time-value-of-money discounting in loss calculations.
-- **Cashflow waterfall** operates **per-period** — investors receive distributions as generated.
+
+A "waterfall" is the contractual rule for how money flows (or losses are allocated) between
+investor tranches. There are two separate waterfalls:
+
+- **Loss waterfall** — runs once per scenario at maturity. Computes total vehicle loss
+  `L[s] = max(0, -NPV(CF[s], discount_rate))` and allocates it junior-first.
+  `discount_rate` defaults to 0.0 (undiscounted sum). Set `discount_rate > 0` on
+  `VehicleInputs` to use time-value-of-money discounting in loss calculations.
+- **Cashflow waterfall** — runs per-period during the vehicle's life. Distributes
+  available cash to each tranche according to coupon entitlement before any residual
+  goes to the first-loss (equity) layer.
 
 ### 3. Correlation at vehicle level
 Post-simulation correlation is applied at project aggregation (vehicle level).
@@ -110,27 +169,73 @@ correlate underlying risk factors (price shocks, yield shocks) at draw time.
 pre-correlated shocks.
 
 ### 4. Calibration algorithm
+
+**Goal:** find the smallest α such that, at α, senior lenders meet *both* their hurdle IRR
+and their maximum loss-probability tolerance. The search is 1-D (α ∈ [0, 1]).
+
 `CatalyticCalibrator.calibrate()`:
-1. Monotonicity check at 20 evenly-spaced α points
-2. If monotone → `scipy.optimize.brentq` (10–15 evaluations, xtol=1e-4)
-3. If not monotone → two-phase grid search (50 coarse + 50 fine points)
-4. Common-random-numbers: paths are pre-generated once, reused across all α evaluations
+1. Probe `_h(α)` at 20 evenly-spaced α points to check monotonicity
+2. If monotone → `scipy.optimize.brentq` — a bracketed root-finder that converges in
+   10–15 function evaluations (xtol=1e-4). This is the fast path.
+3. If not monotone (rare; can happen with small-sample noise) → two-phase grid search
+   (50 coarse + 50 fine points around the best coarse point)
+4. **Common-random-numbers**: the Monte Carlo paths are drawn once and reused for every
+   α evaluation, so noise does not mask the monotone signal.
 
-**Calibration objective note:** `_h(alpha) = min(g1, g2)` where g1 is the
-IRR constraint slack and g2 is the loss-probability constraint slack. The
-`min()` creates a kink where g1==g2, which is non-smooth but still valid
-for Brent's method (sign change is sufficient). If the kink causes issues,
-consider sequential constraint evaluation or a smooth LogSumExp surrogate.
+**Calibration objective:** `_h(alpha) = min(g1, g2)` where:
+- `g1` = (senior median IRR) − (hurdle IRR): positive means IRR constraint is met
+- `g2` = (max_loss_prob) − (observed loss_prob): positive means loss constraint is met
 
-### 5. IRR sentinels
+Calibration finds the α* where `min(g1, g2) = 0` (at least one constraint is binding).
+
+### 5. Project cashflow simulation modes
+
+Two mutually exclusive modes; **never mix them for the same project**:
+
+| Mode | Trigger | Shock application |
+|---|---|---|
+| **Revenue/cost** | `base_revenue` provided | GBM price path × `base_revenue` per period |
+| **Cashflow** | only `base_cashflows` provided | lognormal multiplier applied to positive net-CF periods |
+
+**GBM price path** (revenue/cost mode):
+```
+price_index[s, t] = exp( cumsum( (μ − σ²/2) + σ·ε_t ) )
+revenue[s, t] = base_revenue[t] × price_index[s, t]
+```
+where `μ = price_drift` (or estimated from `price_series`) and `σ = price_vol`.
+This produces a proper log-normal random walk rather than a single i.i.d. scalar multiplier.
+
+**Multi-year capex**: supply `base_cashflows` as a full array including t=0 outflow(s):
+```python
+base_cashflows=[-500_000, -300_000, 0, 180_000, …]  # t=0 and t=1 are construction years
+```
+The simulator uses the array as CF[0..T]; no scalar scaling is applied to negative periods.
+
+### 5a. IRR sentinels
 - `-1.0` → total loss (no positive inflows, capex outflow present)
 - `NaN` → undefined (no investment outflow at t=0) — treated as `-1.0` after cleaning
 - `10.0` → capped (outlier path with >1000% return)
 
-### 6. Portfolio LP (Rockafellar-Uryasev)
-Variables: `w_v` (allocations), `zeta` (VaR threshold), `u_s` (excess loss auxiliaries).
-Objective: minimise `∑ c_v * w_v` (total catalytic capital deployed).
-Solver preference: CLARABEL → ECOS → SCS (cvxpy auto-selects).
+### 6. Portfolio LP (Rockafellar-Uryasev CVaR)
+
+**What it does:** given a fixed catalytic budget `B_cat`, find how much to invest in each
+vehicle (`w_v`) to maximise total commercial capital, while keeping portfolio tail-loss
+(CVaR) within a tolerance.
+
+**CVaR** (Conditional Value-at-Risk) at confidence level β is the *expected* loss in the
+worst `(1−β)` fraction of scenarios. The Rockafellar-Uryasev linearisation makes this
+tractable as a standard LP by introducing auxiliary variables `u_s` (per-scenario excess
+loss) and `zeta` (VaR threshold).
+
+Variables: `w_v` (dollar allocations), `zeta` (VaR threshold), `u_s` (excess loss auxiliaries).
+Objective: **maximise `∑ (1 − c_v) * w_v`** (commercial capital mobilised).
+Budget constraint: `∑ c_v * w_v ≤ B_cat` (total catalytic budget).
+Optional stability constraint: `∑ w_v ≥ min_deployment` (prevents degenerate all-zero solution).
+Solver preference: CLARABEL → ECOS → SCS (cvxpy auto-selects from available solvers).
+
+**`marginal_catalytic_efficiency`** on `VehicleResult` reports `(1 − α*) / α*` — the commercial
+capital mobilised per catalytic dollar at the minimum binding point. This equals `leverage_ratio`
+and is the vehicle-level shadow price of the catalytic budget constraint.
 
 ---
 
@@ -149,8 +254,9 @@ Solver preference: CLARABEL → ECOS → SCS (cvxpy auto-selects).
 ## Changing the Optimization Objective
 
 Edit `PortfolioOptimizer._solve_lp()` in `calibration/portfolio/optimizer.py`.
-The current objective is `min ∑ c_v * w_v`. Alternative: maximise `∑(1-c_v)*w_v`
-(commercial capital mobilized) or minimise weighted-average catalytic fraction.
+The current objective is `max ∑(1-c_v)*w_v` (commercial capital mobilised subject to catalytic
+budget `∑c_v*w_v ≤ B_cat`). Alternative: minimise total catalytic cost `min ∑c_v*w_v`, or
+minimise weighted-average catalytic fraction.
 
 ---
 
@@ -166,7 +272,34 @@ The current objective is `min ∑ c_v * w_v`. Alternative: maximise `∑(1-c_v)*
   or (b) add more protective mitigants (higher `guarantee_coverage` or `grant_reserve`).
 
 - **CVaR constraint too tight**: if the portfolio LP returns status `infeasible`, increase
-  `cvar_max` in `PortfolioInputs` or reduce `cvar_confidence`.
+  `cvar_max` in `PortfolioInputs` or reduce `cvar_confidence`. Also check that
+  `min_deployment` is not set too high relative to `total_budget`.
+
+- **All-zero LP allocation**: if the optimizer returns zero weights for all vehicles, set
+  `min_deployment > 0` in `PortfolioInputs` to enforce a minimum total deployment.
 
 - **Correlation matrix not PD**: `cholesky_correlated_draws()` automatically applies Higham's
   nearest-PD projection. Check the warning log if correlations were modified.
+
+- **Mixed cashflow/revenue modes**: do not provide both `base_cashflows` and `base_revenue` for
+  the same project. If `base_revenue` is set, the simulator uses GBM price paths and ignores
+  `base_cashflows` multiplier logic entirely (mode consistency guard).
+
+- **Excel ingestion with revenue/cost columns**: if your Excel sheet has `revenue` and `cost`
+  columns, `load_project_from_excel()` populates `base_revenue` and `base_costs` directly
+  (not `base_cashflows`). Ensure `price_vol` is set in the sheet or passed as a kwarg.
+
+- **IRR overflow warnings** (`RuntimeWarning: overflow encountered in power`): expected and
+  harmless. They occur when Newton's method evaluates a very high trial IRR (e.g. >500%)
+  on outlier paths. The sentinel cap (`10.0`) is applied afterwards by `clean_irr()`.
+  Suppress with `warnings.filterwarnings("ignore", "overflow")` if needed.
+
+- **High alpha (>50%) from `--folder` mode**: the folder loader uses conservative vehicle
+  defaults (25% guarantee, 5% reserve). If calibrated α is unexpectedly high, either (a) the
+  projects are genuinely high-risk given the hurdle IRR, or (b) increase `guarantee_coverage`
+  and `grant_reserve` via `--json` for full control. Leverage < 1× means concessional capital
+  exceeds commercial — this is realistic for early-stage or high-vol projects.
+
+- **`load_price_series` frequency detection**: if dates can't be parsed (e.g. non-standard
+  format), the function defaults to annual frequency (no scaling). Pass pre-annualised
+  log-returns by supplying annual price observations to avoid this.

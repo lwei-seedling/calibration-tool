@@ -22,15 +22,19 @@ class PortfolioOptimizer:
     Steps:
     1. For each vehicle: simulate correlated project cashflows.
     2. Calibrate the minimum catalytic fraction per vehicle.
-    3. Solve the portfolio allocation LP to minimise total catalytic capital
-       subject to budget, return, and CVaR constraints.
+    3. Solve the portfolio allocation LP to MAXIMIZE total commercial capital
+       mobilized, subject to catalytic budget, return, and CVaR constraints.
 
     LP formulation (Rockafellar-Uryasev CVaR linearization):
 
-      MINIMIZE    sum_v c_v * w_v           (total catalytic capital)
+      MAXIMIZE    sum_v (1 - c_v) * w_v     (total commercial capital mobilized)
       s.t.
-        sum_v w_v = B
-        w_v_min <= w_v <= w_v_max
+        [if catalytic_budget set]  sum_v c_v * w_v <= B_cat
+        [else legacy]              sum_v w_v == B_total
+        [if total_budget set]      sum_v w_v <= B_total
+        [if min_deployment set]    sum_v w_v >= min_deployment
+        w_v >= w_v_min
+        w_v <= total_capital_v     (per-vehicle capacity)
         mean(R_portfolio) >= R_min
         zeta + 1/(S*(1-beta)) * sum_s u_s <= CVaR_max
         u_s >= sum_v l_{v,s} * w_v - zeta    for all s
@@ -186,11 +190,12 @@ class PortfolioOptimizer:
         catalytic_fractions: list[float],
         loss_rates: list[np.ndarray],
         return_rates: list[np.ndarray],
+        vehicle_capacities: np.ndarray,
     ) -> tuple[np.ndarray, str]:
         """Solve the portfolio allocation LP.
 
         Variables:
-          w: (N_v,) allocations
+          w: (N_v,) allocations (total capital per vehicle)
           zeta: scalar VaR threshold
           u: (S,) excess loss auxiliary variables
 
@@ -208,7 +213,7 @@ class PortfolioOptimizer:
         zeta = cp.Variable(name="zeta")
         u = cp.Variable(S, nonneg=True, name="u")
 
-        # c_v: catalytic fraction (objective coefficient)
+        # c_v: catalytic fraction per vehicle
         c = np.array(catalytic_fractions)
 
         # l_vs: loss rate matrix (N_v, S)
@@ -217,24 +222,33 @@ class PortfolioOptimizer:
         # r_vs: return rate matrix (N_v, S)
         R = np.stack(return_rates, axis=0)  # (N_v, S)
 
-        # Objective: minimize total catalytic capital deployed
-        objective = cp.Minimize(c @ w)
+        # Objective: MAXIMIZE total commercial capital mobilized
+        objective = cp.Maximize((1.0 - c) @ w)
 
         constraints = [
-            # Budget equality
-            cp.sum(w) == B,
-            # Per-vehicle bounds
+            # Per-vehicle minimum allocation
             w >= cfg.min_allocation,
-            w <= cfg.max_allocation_fraction * B,
+            # Per-vehicle capacity (natural upper bound from vehicle total_capital)
+            w <= vehicle_capacities,
         ]
+
+        if cfg.catalytic_budget is not None:
+            # New mode: catalytic budget constraint (foundation's catalytic capital limit)
+            constraints.append(c @ w <= cfg.catalytic_budget)
+            # Total capital upper bound (optional)
+            constraints.append(cp.sum(w) <= B)
+        else:
+            # Legacy mode: total budget equality
+            constraints.append(cp.sum(w) == B)
+
+        # Minimum total deployment (prevents degenerate all-zero solution)
+        if cfg.min_deployment > 0.0:
+            constraints.append(cp.sum(w) >= cfg.min_deployment)
 
         # Minimum expected return constraint
         if cfg.min_expected_return > 0:
-            # mean portfolio return = (1/S) * sum_s sum_v w_v * R_v[s] / B
-            portfolio_return_sum = cp.sum(R @ w)  # shape scalar: sum over s of (sum_v R_{v,s} * w_v)
-            # But R has shape (N_v, S), so R @ w gives (S,) portfolio returns per path
-            # Actually R is (N_v, S), so R.T @ w gives (S,) portfolio-level returns weighted by w
-            # Mean return = (1/S) * sum_s (R.T @ w)[s] / B
+            # Mean portfolio return = (1/S) * sum_s (R.T @ w)[s] / sum(w)
+            # Approximated as: (1/(S*B)) * sum_s (R.T @ w)[s] >= R_min
             constraints.append(
                 (1.0 / (S * B)) * cp.sum(R.T @ w) >= cfg.min_expected_return
             )
@@ -290,7 +304,10 @@ class PortfolioOptimizer:
             all_return_rates.append(return_rate)
 
         # Solve allocation LP
-        w_opt, status = self._solve_lp(all_alphas, all_loss_rates, all_return_rates)
+        vehicle_capacities = np.array([v.total_capital for v in inputs.vehicles])
+        w_opt, status = self._solve_lp(
+            all_alphas, all_loss_rates, all_return_rates, vehicle_capacities
+        )
 
         # Build result
         allocations = {v: float(w_opt[v]) for v in range(N_v)}
@@ -301,16 +318,19 @@ class PortfolioOptimizer:
         total_commercial = sum(commercial_allocs.values())
         leverage = total_commercial / max(total_catalytic, 1e-9)
 
+        # Marginal catalytic efficiency per vehicle = (1-alpha)/alpha (leverage at min feasible alpha).
+        # This is the commercial capital mobilized per unit of catalytic capital deployed.
         marginal_eff = {
             v: (1.0 - all_alphas[v]) / max(all_alphas[v], 1e-9)
             for v in range(N_v)
         }
 
-        # Portfolio-level IRR distribution (weighted by allocation)
+        # Portfolio-level IRR/loss distributions (weighted by deployed capital)
+        total_deployed = max(float(w_opt.sum()), 1e-9)
         portfolio_return_paths = np.zeros(n_sims)
         portfolio_loss_paths = np.zeros(n_sims)
         for v in range(N_v):
-            weight = w_opt[v] / max(inputs.total_budget, 1e-9)
+            weight = w_opt[v] / total_deployed
             portfolio_return_paths += weight * all_return_rates[v]
             portfolio_loss_paths += weight * all_loss_rates[v]
 

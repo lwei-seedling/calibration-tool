@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """End-to-end runner for the Catalytic Capital Calibration Tool.
 
-Supports three input modes:
+Supports four input modes:
   1. Built-in sample data (default, no arguments needed)
   2. CSV files in a directory (--csv <dir>)
   3. JSON portfolio spec (--json <file>)
+  4. Folder-based vehicle input (--folder <dir>)
 
 Usage:
     python run_e2e.py
     python run_e2e.py --csv examples/
     python run_e2e.py --json examples/portfolio.json
     python run_e2e.py --json examples/portfolio.json --sims 5000 --seed 42
+    python run_e2e.py --folder examples/  # each subfolder = vehicle, each file = project
 """
 from __future__ import annotations
 
@@ -60,11 +62,15 @@ def print_results(result: PortfolioResult, inputs: PortfolioInputs, vehicle_name
     _section("Portfolio Summary")
     total_catalytic = sum(result.catalytic_allocations.values())
     total_commercial = sum(result.commercial_allocations.values())
+    total_deployed = total_catalytic + total_commercial
+    ref = max(total_deployed, 1.0)
     print(f"  Solver status          : {result.status}")
     print(f"  Total budget           : ${inputs.total_budget:>12,.0f}")
-    print(f"  Total catalytic capital: ${total_catalytic:>12,.0f}  ({total_catalytic/inputs.total_budget:.1%})")
-    print(f"  Total commercial capital: ${total_commercial:>11,.0f}  ({total_commercial/inputs.total_budget:.1%})")
+    print(f"  Total deployed capital : ${total_deployed:>12,.0f}")
+    print(f"  Total catalytic capital: ${total_catalytic:>12,.0f}  ({total_catalytic/ref:.1%} of deployed)")
+    print(f"  Total commercial capital: ${total_commercial:>11,.0f}  ({total_commercial/ref:.1%} of deployed)")
     print(f"  Portfolio leverage ratio: {result.leverage_ratio:>10.2f}x  (commercial per catalytic $)")
+    print(f"  Catalytic efficiency   : {result.leverage_ratio:>10.2f}x  (marginal commercial / catalytic)")
     print(f"  Portfolio CVaR (95%)   : {result.cvar_95:>11.1%}  of deployed capital")
 
     irr_clean = result.portfolio_irr_distribution[np.isfinite(result.portfolio_irr_distribution)]
@@ -72,7 +78,7 @@ def print_results(result: PortfolioResult, inputs: PortfolioInputs, vehicle_name
         print(f"  Portfolio median IRR   : {float(np.median(irr_clean)):>11.1%}")
         print(f"  Portfolio IRR p10/p90  :  {float(np.percentile(irr_clean, 10)):.1%}  /  {float(np.percentile(irr_clean, 90)):.1%}")
 
-    _section("Per-Vehicle Breakdown")
+    _section("Per-Vehicle Breakdown (sorted by marginal efficiency, highest first)")
     rows = []
     for v_idx, name in enumerate(vehicle_names):
         alpha = result.catalytic_fractions[v_idx]
@@ -86,8 +92,11 @@ def print_results(result: PortfolioResult, inputs: PortfolioInputs, vehicle_name
             "Alpha (cat %)": f"{alpha:.1%}",
             "Catalytic $": f"{cat:,.0f}",
             "Commercial $": f"{com:,.0f}",
-            "Leverage": f"{eff:.1f}x",
+            "Leverage (x)": f"{com / max(cat, 1.0):.1f}x",
+            "Marg. Efficiency": f"{eff:.1f}x",
         })
+    # Sort by marginal efficiency descending
+    rows.sort(key=lambda r: float(r["Marg. Efficiency"].replace("x", "")), reverse=True)
     df = pd.DataFrame(rows).set_index("Vehicle")
     print(df.to_string())
 
@@ -192,32 +201,24 @@ def _project_from_cashflow_csv(df: pd.DataFrame, price_vol: float = 0.15) -> Pro
     """Build a ProjectInputs from a cashflow-format CSV.
 
     Expected columns:
-        year     : integer period (0 = capex outflow, 1..T = operating CFs)
-        cashflow : net cashflow for that period
+        year     : integer period (0 = t=0 outflow, 1..T = operating CFs)
+        cashflow : net cashflow for that period (t=0 is typically negative capex)
 
-    If year=0 is present with a negative value, it is treated as capex.
-    All other rows (year >= 1) are treated as base_cashflows.
+    ALL rows (year 0..T) are included in base_cashflows as a full-lifecycle array.
+    Multi-year capex (negative values in early years) is fully supported.
     """
     df = df.copy()
     df.columns = [c.strip().lower() for c in df.columns]
     df = df.sort_values("year").reset_index(drop=True)
 
-    capex = 0.0
-    if df["year"].min() == 0:
-        t0_val = float(df.loc[df["year"] == 0, "cashflow"].iloc[0])
-        if t0_val < 0:
-            capex = abs(t0_val)
-        df = df[df["year"] > 0]
-
     base_cashflows = df["cashflow"].tolist()
-    if not base_cashflows:
-        raise ValueError("Cashflow CSV has no operating-period rows (year >= 1).")
+    if len(base_cashflows) < 2:
+        raise ValueError(
+            "Cashflow CSV must have at least 2 rows (t=0 and t=1). "
+            f"Got {len(base_cashflows)} rows."
+        )
 
-    return ProjectInputs(
-        capex=capex if capex > 0 else None,
-        base_cashflows=base_cashflows,
-        price_vol=price_vol,
-    )
+    return ProjectInputs(base_cashflows=base_cashflows, price_vol=price_vol)
 
 
 def _load_csv_inputs(csv_dir: Path, n_sims: int, seed: int | None) -> tuple[PortfolioInputs, list[str]]:
@@ -284,10 +285,13 @@ def _load_csv_inputs(csv_dir: Path, n_sims: int, seed: int | None) -> tuple[Port
         J = len(projects)
         # Default correlation: moderate positive (0.30 off-diagonal)
         corr = [[1.0 if i == j else 0.30 for j in range(J)] for i in range(J)]
-        # For cashflow-mode projects capex may be 0; estimate total capital from CFs
-        capex_sum = sum(
-            (p.capex or abs(min(p.base_cashflows or [0]))) for p in projects
-        )
+        # Estimate total capital from the t=0 outflow (first element of base_cashflows)
+        # or from capex in parametric mode.
+        def _project_investment(p: ProjectInputs) -> float:
+            if p.base_cashflows is not None:
+                return abs(min(p.base_cashflows[0], 0.0))  # t=0 outflow (if negative)
+            return p.capex or 0.0
+        capex_sum = sum(_project_investment(p) for p in projects)
         total_capital = max(capex_sum, 1.0) * 1.2  # 20% buffer
 
         vehicles.append(VehicleInputs(
@@ -302,6 +306,137 @@ def _load_csv_inputs(csv_dir: Path, n_sims: int, seed: int | None) -> tuple[Port
         ))
         vname = csv_path.stem.replace("projects_", "").replace("_", " ").title()
         names.append(vname)
+
+    total_budget = sum(v.total_capital for v in vehicles)
+    inputs = PortfolioInputs(
+        vehicles=vehicles,
+        calibrator_config=CalibratorConfig(investor_hurdle_irr=0.07, max_loss_probability=0.08),
+        total_budget=total_budget,
+        max_allocation_fraction=0.70,
+        cvar_confidence=0.95,
+        cvar_max=0.35,
+        n_sims=n_sims,
+        seed=seed,
+    )
+    return inputs, names
+
+
+# ---------------------------------------------------------------------------
+# Folder-based vehicle loader (--folder)
+# ---------------------------------------------------------------------------
+
+def _load_folder_inputs(folder: Path, n_sims: int, seed: int | None) -> tuple[PortfolioInputs, list[str]]:
+    """Load vehicles from a folder structure: each subfolder = vehicle.
+
+    Expected layout::
+
+        folder/
+          vehicle_1/
+            project_a.csv       ← loaded via load_project_from_excel()
+            project_b.xlsx      ← loaded via load_project_from_excel()
+            price_carbon.csv    ← price series; referenced by project files, not loaded directly
+          vehicle_2/
+            project_x.csv
+
+    Rules:
+        - Files prefixed ``project_`` (or ``*.xlsx``) are loaded as projects via
+          load_project_from_excel(), which handles Year/Yield/Capex/Opex format with
+          embedded or external price params (Option 1 / 2).
+        - Files prefixed ``price_`` are price series; they are NOT loaded directly —
+          project files reference them via the Price_File column.
+        - Other CSV files are attempted as legacy cashflow or parametric format.
+
+    Vehicle-level settings (guarantee, correlation, etc.) are inferred with
+    conservative defaults. For full control use --json.
+    """
+    from calibration.utils.loaders import load_project_from_excel
+
+    subdirs = sorted(p for p in folder.iterdir() if p.is_dir())
+    if not subdirs:
+        print(f"ERROR: No subdirectories found in {folder}. Each subfolder should be a vehicle.")
+        sys.exit(1)
+
+    vehicles = []
+    names = []
+    for subdir in subdirs:
+        all_files = sorted(subdir.glob("*.csv")) + sorted(subdir.glob("*.xlsx"))
+        project_files = [
+            f for f in all_files
+            if not f.name.startswith("price_")   # skip price series files
+        ]
+        if not project_files:
+            print(f"  WARNING: No project files found in {subdir.name}, skipping vehicle.")
+            continue
+
+        projects: list[ProjectInputs] = []
+        for fpath in project_files:
+            try:
+                if fpath.suffix.lower() in (".xlsx", ".xls") or fpath.name.startswith("project_"):
+                    # New format: Year/Yield/Capex/Opex with embedded or external price params
+                    proj = load_project_from_excel(fpath)
+                    projects.append(proj)
+                else:
+                    # Legacy: cashflow (year, cashflow) or parametric (capex, price, ...)
+                    df = pd.read_csv(fpath)
+                    if _is_cashflow_format(df):
+                        proj = _project_from_cashflow_csv(df)
+                        projects.append(proj)
+                    else:
+                        required = {"capex", "opex_annual", "price", "yield_", "lifetime_years"}
+                        missing = required - {c.strip().lower() for c in df.columns}
+                        if missing:
+                            print(f"  WARNING: {fpath.name} missing columns {missing}, skipping.")
+                            continue
+                        df.columns = [c.strip().lower() for c in df.columns]
+                        for _, row in df.iterrows():
+                            projects.append(ProjectInputs(
+                                capex=float(row["capex"]),
+                                opex_annual=float(row["opex_annual"]),
+                                price=float(row["price"]),
+                                yield_=float(row["yield_"]),
+                                lifetime_years=int(row["lifetime_years"]),
+                                price_vol=float(row.get("price_vol", 0.15)),
+                                yield_vol=float(row.get("yield_vol", 0.10)),
+                                inflation_rate=float(row.get("inflation_rate", 0.03)),
+                                fx_vol=float(row.get("fx_vol", 0.05)),
+                                delay_prob=float(row.get("delay_prob", 0.05)),
+                            ))
+            except Exception as exc:
+                print(f"  WARNING: Failed to load {fpath.name}: {exc}")
+                continue
+
+        if not projects:
+            print(f"  WARNING: No valid projects loaded from {subdir.name}, skipping vehicle.")
+            continue
+
+        J = len(projects)
+        corr = [[1.0 if i == j else 0.30 for j in range(J)] for i in range(J)]
+
+        def _project_investment(p: ProjectInputs) -> float:
+            if p.base_cashflows is not None:
+                # Sum all negative construction CFs (multi-year capex)
+                return abs(sum(cf for cf in p.base_cashflows if cf < 0))
+            return p.capex or 0.0
+
+        capex_sum = sum(_project_investment(p) for p in projects)
+        total_capital = max(capex_sum, 1.0) * 1.2
+
+        vehicles.append(VehicleInputs(
+            projects=projects,
+            correlation_matrix=corr,
+            total_capital=total_capital,
+            guarantee_coverage=0.25,
+            grant_reserve=total_capital * 0.05,
+            mezzanine_fraction=0.10,
+            senior_coupon=0.08,
+            mezzanine_coupon=0.12,
+        ))
+        names.append(subdir.name.replace("_", " ").title())
+        print(f"  {subdir.name}: {J} project(s) loaded  |  capital=${total_capital:,.0f}")
+
+    if not vehicles:
+        print(f"ERROR: No vehicles loaded from {folder}.")
+        sys.exit(1)
 
     total_budget = sum(v.total_capital for v in vehicles)
     inputs = PortfolioInputs(
@@ -365,6 +500,8 @@ def main():
                        help="Directory containing projects_vehicle_N.csv files.")
     group.add_argument("--json", metavar="FILE", type=Path,
                        help="JSON file with full portfolio specification.")
+    group.add_argument("--folder", metavar="DIR", type=Path,
+                       help="Directory where each subfolder = vehicle, each file inside = project.")
     parser.add_argument("--sims", type=int, default=None,
                         help="Override number of Monte Carlo simulations (default: 1000).")
     parser.add_argument("--seed", type=int, default=None,
@@ -388,6 +525,13 @@ def main():
             sys.exit(1)
         print(f"Loading portfolio from JSON: {args.json}")
         inputs, vehicle_names = _load_json_inputs(args.json, args.sims, seed)
+
+    elif args.folder:
+        if not args.folder.is_dir():
+            print(f"ERROR: {args.folder} is not a directory.")
+            sys.exit(1)
+        print(f"Loading vehicles from folder structure: {args.folder}")
+        inputs, vehicle_names = _load_folder_inputs(args.folder, n_sims, seed)
 
     else:
         print("Using built-in sample data (East Africa + West Africa funds).")
