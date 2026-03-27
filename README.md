@@ -418,9 +418,19 @@ examples/
 └── vehicle_2/
     └── clean_energy.xlsx
 ```
-Each Excel file must have a `cashflow` column (or `revenue` + `cost` columns). Vehicle-level
-settings (guarantee, correlation, etc.) default to conservative values unless a
-`vehicle_config.json` is present in the sub-folder.
+Each Excel/CSV file must have a `cashflow` column (or `Year`/`Yield`/`Capex`/`Opex` columns for the new format). Vehicle-level settings (guarantee, correlation, etc.) default to conservative values:
+
+| Setting | Default |
+|---|---|
+| `guarantee_coverage` | 25% of senior notional |
+| `grant_reserve` | 5% of estimated total capital |
+| `mezzanine_fraction` | 10% |
+| `senior_coupon` | 8% |
+| `mezzanine_coupon` | 12% |
+| `correlation_matrix` | 0.30 off-diagonal (moderate positive correlation) |
+| `total_capital` | 1.2× sum of construction capex across all projects |
+
+For full control over these settings, use the `--json` format instead.
 
 ---
 
@@ -612,6 +622,9 @@ The portfolio allocation LP has no feasible solution. Options:
 
 **LP solver returns all-zero weights**
 No capital is deployed. Set `min_deployment > 0` in `PortfolioInputs` (or `"min_deployment"` in JSON) to enforce a minimum total deployment floor.
+
+**`RuntimeWarning: overflow encountered in power / multiply`**
+Harmless. Newton's method for IRR evaluation hits overflow on high-return outlier paths. The sentinel cap (`10.0` = 1000% IRR) is applied by `clean_irr()` afterwards. Results are unaffected.
 
 **`UserWarning: Base-case lifetime revenue is less than capex`**
 The project has negative expected NPV at base-case assumptions. This is a warning, not an error — the Monte Carlo will still run. Review your `price`, `yield_`, and `lifetime_years` inputs.

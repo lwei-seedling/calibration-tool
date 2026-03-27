@@ -326,24 +326,28 @@ def _load_csv_inputs(csv_dir: Path, n_sims: int, seed: int | None) -> tuple[Port
 # ---------------------------------------------------------------------------
 
 def _load_folder_inputs(folder: Path, n_sims: int, seed: int | None) -> tuple[PortfolioInputs, list[str]]:
-    """Load vehicles from a folder structure: each subfolder = vehicle, each file = project.
+    """Load vehicles from a folder structure: each subfolder = vehicle.
 
     Expected layout::
 
         folder/
           vehicle_1/
-            project_a.csv
-            project_b.xlsx
+            project_a.csv       ← loaded via load_project_from_excel()
+            project_b.xlsx      ← loaded via load_project_from_excel()
+            price_carbon.csv    ← price series; referenced by project files, not loaded directly
           vehicle_2/
             project_x.csv
 
-    Each CSV/XLSX file becomes one project. Projects within the same subfolder
-    are grouped into one vehicle. Vehicle-level settings are inferred with
-    conservative defaults (same as --csv mode).
+    Rules:
+        - Files prefixed ``project_`` (or ``*.xlsx``) are loaded as projects via
+          load_project_from_excel(), which handles Year/Yield/Capex/Opex format with
+          embedded or external price params (Option 1 / 2).
+        - Files prefixed ``price_`` are price series; they are NOT loaded directly —
+          project files reference them via the Price_File column.
+        - Other CSV files are attempted as legacy cashflow or parametric format.
 
-    Supported file formats per project:
-        *.csv  — auto-detected as cashflow (year, cashflow columns) or parametric
-        *.xlsx — loaded via load_project_from_excel()
+    Vehicle-level settings (guarantee, correlation, etc.) are inferred with
+    conservative defaults. For full control use --json.
     """
     from calibration.utils.loaders import load_project_from_excel
 
@@ -355,20 +359,28 @@ def _load_folder_inputs(folder: Path, n_sims: int, seed: int | None) -> tuple[Po
     vehicles = []
     names = []
     for subdir in subdirs:
-        project_files = sorted(subdir.glob("*.csv")) + sorted(subdir.glob("*.xlsx"))
+        all_files = sorted(subdir.glob("*.csv")) + sorted(subdir.glob("*.xlsx"))
+        project_files = [
+            f for f in all_files
+            if not f.name.startswith("price_")   # skip price series files
+        ]
         if not project_files:
-            print(f"  WARNING: No CSV/XLSX files found in {subdir.name}, skipping vehicle.")
+            print(f"  WARNING: No project files found in {subdir.name}, skipping vehicle.")
             continue
 
         projects: list[ProjectInputs] = []
         for fpath in project_files:
             try:
-                if fpath.suffix.lower() in (".xlsx", ".xls"):
+                if fpath.suffix.lower() in (".xlsx", ".xls") or fpath.name.startswith("project_"):
+                    # New format: Year/Yield/Capex/Opex with embedded or external price params
                     proj = load_project_from_excel(fpath)
+                    projects.append(proj)
                 else:
+                    # Legacy: cashflow (year, cashflow) or parametric (capex, price, ...)
                     df = pd.read_csv(fpath)
                     if _is_cashflow_format(df):
                         proj = _project_from_cashflow_csv(df)
+                        projects.append(proj)
                     else:
                         required = {"capex", "opex_annual", "price", "yield_", "lifetime_years"}
                         missing = required - {c.strip().lower() for c in df.columns}
@@ -389,9 +401,6 @@ def _load_folder_inputs(folder: Path, n_sims: int, seed: int | None) -> tuple[Po
                                 fx_vol=float(row.get("fx_vol", 0.05)),
                                 delay_prob=float(row.get("delay_prob", 0.05)),
                             ))
-                        continue  # parametric rows already appended
-                    proj = _project_from_cashflow_csv(df)
-                projects.append(proj)
             except Exception as exc:
                 print(f"  WARNING: Failed to load {fpath.name}: {exc}")
                 continue
@@ -405,7 +414,8 @@ def _load_folder_inputs(folder: Path, n_sims: int, seed: int | None) -> tuple[Po
 
         def _project_investment(p: ProjectInputs) -> float:
             if p.base_cashflows is not None:
-                return abs(min(p.base_cashflows[0], 0.0))
+                # Sum all negative construction CFs (multi-year capex)
+                return abs(sum(cf for cf in p.base_cashflows if cf < 0))
             return p.capex or 0.0
 
         capex_sum = sum(_project_investment(p) for p in projects)

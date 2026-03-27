@@ -53,7 +53,7 @@ calibration/
 └── utils/
     ├── irr.py         # batch_irr(), clean_irr() with edge-case sentinels
     ├── stats.py       # var(), cvar(), cholesky_correlated_draws()
-    └── loaders.py     # load_project_from_excel(), load_vehicle_from_folder()
+    └── loaders.py     # load_project_from_excel(), load_price_series()
 ```
 
 ---
@@ -123,6 +123,11 @@ python run_e2e.py --sims 5000 --seed 42
 ```
 
 See `README.md` for CSV/JSON format specifications.
+
+**Folder mode file rules** (loaded by `_load_folder_inputs` in `run_e2e.py`):
+- `project_*.csv` / `*.xlsx` → loaded as project data via `load_project_from_excel()`
+- `price_*.csv` → price series; referenced by project files via `Price_File` column, **not** loaded directly
+- Other `.csv` files → treated as legacy cashflow or parametric format
 
 ---
 
@@ -283,3 +288,18 @@ minimise weighted-average catalytic fraction.
 - **Excel ingestion with revenue/cost columns**: if your Excel sheet has `revenue` and `cost`
   columns, `load_project_from_excel()` populates `base_revenue` and `base_costs` directly
   (not `base_cashflows`). Ensure `price_vol` is set in the sheet or passed as a kwarg.
+
+- **IRR overflow warnings** (`RuntimeWarning: overflow encountered in power`): expected and
+  harmless. They occur when Newton's method evaluates a very high trial IRR (e.g. >500%)
+  on outlier paths. The sentinel cap (`10.0`) is applied afterwards by `clean_irr()`.
+  Suppress with `warnings.filterwarnings("ignore", "overflow")` if needed.
+
+- **High alpha (>50%) from `--folder` mode**: the folder loader uses conservative vehicle
+  defaults (25% guarantee, 5% reserve). If calibrated α is unexpectedly high, either (a) the
+  projects are genuinely high-risk given the hurdle IRR, or (b) increase `guarantee_coverage`
+  and `grant_reserve` via `--json` for full control. Leverage < 1× means concessional capital
+  exceeds commercial — this is realistic for early-stage or high-vol projects.
+
+- **`load_price_series` frequency detection**: if dates can't be parsed (e.g. non-standard
+  format), the function defaults to annual frequency (no scaling). Pass pre-annualised
+  log-returns by supplying annual price observations to avoid this.
