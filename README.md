@@ -241,6 +241,117 @@ python run_e2e.py --json examples/portfolio.json --sims 5000 --seed 123
 
 ---
 
+### Option C — Folder-per-vehicle with Year/Yield/Capex/Opex files
+
+This is the recommended format when you have project financial models with explicit
+year-by-year construction and operating cashflows. Each vehicle is a sub-folder;
+each `.csv` (or `.xlsx`) file inside it is one project.
+
+#### File mask
+
+```
+examples/folder/
+├── <vehicle_name>/
+│   ├── <project_name>.csv
+│   ├── <project_name>.csv
+│   └── <project_name>.csv
+└── <vehicle_name>/
+    └── ...
+```
+
+- The **folder name** becomes the vehicle display name.
+- The **file name** (without extension) becomes the project display name.
+- Glob pattern: `examples/folder/**/*.csv` (or `*.xlsx`).
+- Files are loaded in alphabetical order within each vehicle folder.
+
+#### Column format
+
+| Column | Required | Description |
+|---|---|---|
+| `Year` | Yes | Calendar year (integer). Determines `lifetime_years` and period ordering. |
+| `Yield` | Yes* | Revenue or output value per year ($). Zero during construction. |
+| `Capex` | Yes* | Capital expenditure per year ($). Zero during operations. |
+| `Opex` | Yes* | Operating cost per year ($). May be non-zero during construction. |
+
+*Alternatively use `Revenue`/`Cost`/`Capex`, or a single pre-computed `Cashflow` column.
+`Yield` is treated as revenue; `Opex` as cost. Net cashflow per period = `Yield − Opex − Capex`.
+
+> Negative periods (construction) are passed to the simulator unchanged — the GBM multiplier
+> is **not** applied to outflows. Only positive operating cashflow periods are stochastically shocked.
+
+#### Worked example — single project
+
+```csv
+Year,Yield,Capex,Opex
+2025,0,500000,100000
+2026,0,300000,100000
+2027,0,100000,100000
+2028,0,0,100000
+2029,500000,0,100000
+...
+2045,500000,0,100000
+```
+
+Net cashflows implied: `−600k, −400k, −200k, −100k, +400k × 17 years`
+
+#### Built-in sample data (3 vehicles, 3 projects each)
+
+```
+examples/folder/
+├── v1_east_africa_solar/
+│   ├── solar_kenya.csv       # 4yr construction, 17yr ops, Yield=$500k/yr
+│   ├── solar_tanzania.csv    # 3yr construction, 15yr ops, Yield=$380k/yr
+│   └── solar_ethiopia.csv    # 2yr construction, 12yr ops, Yield=$250k/yr
+├── v2_west_africa_agri/
+│   ├── agroforestry_ghana.csv   # 3yr construction + yield ramp-up, 12yr full ops
+│   ├── cashcrop_nigeria.csv     # 2yr construction, 13yr ops, Yield=$350k/yr
+│   └── forestry_senegal.csv     # 4yr construction, 22yr ops (long-cycle forestry)
+└── v3_sea_water/
+    ├── water_indonesia.csv   # 3yr construction, 16yr ops, Yield=$550k/yr
+    ├── water_vietnam.csv     # 2yr construction, 14yr ops, Yield=$400k/yr
+    └── water_philippines.csv # 3yr construction, 14yr ops, Yield=$350k/yr
+```
+
+Run:
+```bash
+python run_e2e.py --folder examples/folder/ --sims 1000 --seed 42
+```
+
+#### Key validation points
+
+Before running, verify each project file passes these checks:
+
+| # | Check | Why it matters |
+|---|---|---|
+| 1 | **Year column is present and strictly increasing** (no gaps, no duplicates) | The loader sorts by Year; gaps or duplicates cause incorrect period indices |
+| 2 | **At least one row with Capex > 0** | No investment = no project; loader may infer `capex=0` silently |
+| 3 | **Net CF at t=0 is negative** (`Yield − Opex − Capex < 0` in the first year) | IRR is undefined without an initial outflow; sentinel `-1.0` will be returned for all paths |
+| 4 | **At least one operating year with `Yield − Opex > 0`** | If operating CF is never positive, IRR calibration will always be infeasible |
+| 5 | **Capex and Opex are non-negative** | These are costs; negative values indicate a data entry error |
+| 6 | **Yield = 0 during all construction years** | Non-zero yield during construction mixes capex and revenue, distorting cashflow timing |
+| 7 | **Capex = 0 during all operating years** | Construction capex in operating years inflates the negative cashflow and underestimates IRR |
+| 8 | **Lifetime ≤ 50 years** | `ProjectInputs` enforces a 50-year maximum; files exceeding this will raise a validation error |
+| 9 | **Total operating cashflow > total construction cashflow (absolute)** | `∑(Yield−Opex) > ∑(Capex+Opex_construction)` ensures the project is NPV-positive at 0% discount; failing this means no commercially viable α exists |
+| 10 | **No blank / NaN cells in numeric columns** | Blanks are filled with 0; a blank Capex row in a construction year silently drops that outflow |
+| 11 | **Vehicle folder contains ≥ 1 project file** | An empty vehicle folder raises an error at load time |
+| 12 | **`price_vol` is set** (default 0.15 if omitted) | Controls the width of Monte Carlo spread; very low values (< 0.05) may compress IRR variance and make calibration trivially easy or trivially hard |
+
+**Quick sanity check** (run before `run_e2e.py`):
+```python
+from calibration.utils.loaders import load_project_from_excel
+import numpy as np
+
+p = load_project_from_excel("examples/folder/v1_east_africa_solar/solar_kenya.csv")
+cf = np.array(p.base_cashflows)
+print("t=0 CF (should be negative):", cf[0])
+print("Operating CFs (should be positive):", cf[1:])
+print("Simple NPV at 0% discount:", cf.sum())
+assert cf[0] < 0, "ERROR: no initial outflow"
+assert cf.sum() > 0, "ERROR: project has negative total cashflow"
+```
+
+---
+
 ## Runner Options
 
 ```
@@ -422,9 +533,14 @@ calibration-tool/
 ├── pyproject.toml              # dependencies and build config
 ├── run_e2e.py                  # end-to-end runner (CLI)
 ├── examples/
-│   ├── projects_vehicle_1.csv  # sample: East Africa projects
-│   ├── projects_vehicle_2.csv  # sample: West Africa projects
-│   └── portfolio.json          # sample: full JSON spec
+│   ├── projects_vehicle_1.csv  # sample: parametric CSV (Option A2)
+│   ├── projects_vehicle_2.csv  # sample: parametric CSV (Option A2)
+│   ├── cashflow_vehicle.csv    # sample: cashflow CSV (Option A1)
+│   ├── portfolio.json          # sample: full JSON spec (Option B)
+│   └── folder/                 # sample: folder-per-vehicle (Option C)
+│       ├── v1_east_africa_solar/   (3 projects)
+│       ├── v2_west_africa_agri/    (3 projects)
+│       └── v3_sea_water/           (3 projects)
 ├── calibration/
 │   ├── project/                # Monte Carlo project simulation
 │   ├── vehicle/                # Dual waterfall + catalytic calibration

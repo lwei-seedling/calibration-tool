@@ -30,8 +30,18 @@ def load_project_from_excel(
 
     The returned ProjectInputs uses cashflow mode with the provided price_vol.
     """
-    df = pd.read_excel(file_path, engine="openpyxl")
+    file_path = Path(file_path)
+    if file_path.suffix.lower() == ".csv":
+        df = pd.read_csv(file_path)
+    else:
+        df = pd.read_excel(file_path, engine="openpyxl")
     df.columns = [str(c).strip().lower() for c in df.columns]
+
+    # Column aliases: accept natural field names used in project finance models
+    if "yield" in df.columns and "revenue" not in df.columns:
+        df = df.rename(columns={"yield": "revenue"})
+    if "opex" in df.columns and "cost" not in df.columns and "costs" not in df.columns:
+        df = df.rename(columns={"opex": "cost"})
 
     # Sort by year if present
     if "year" in df.columns:
@@ -60,7 +70,13 @@ def load_project_from_excel(
     cost_col = "cost" if "cost" in df.columns else "costs"
     has_capex_col = "capex" in df.columns
 
-    if has_revenue:
+    # Calendar-year files (Year >= 1900) cannot use the t=0 split logic.
+    # Route them to the net-CF fallback instead of Option B.
+    _uses_calendar_years = (
+        "year" in df.columns and int(df["year"].iloc[0]) >= 1900
+    )
+
+    if has_revenue and not _uses_calendar_years:
         # Option B: separate revenue and cost columns
         # Identify t=0 row vs operating rows
         if "year" in df.columns:
