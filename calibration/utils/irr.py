@@ -1,10 +1,60 @@
-"""IRR computation with edge case handling."""
+"""IRR computation with edge case handling.
+
+Why brentq instead of Newton's method
+--------------------------------------
+Newton-Raphson explores unbounded regions of r, producing (1+r)**t overflow
+for large t and extreme trial rates. brentq is a bracketed root-finder: it
+*guarantees* every evaluation of NPV(r) occurs within the interval
+[-0.999, 10.0], so no overflow is possible.
+
+Why NaN is expected in some Monte Carlo paths
+----------------------------------------------
+In a blended-finance Monte Carlo, some simulation paths produce cashflow
+sequences with no sign change (e.g. construction-phase-only losses with zero
+revenue in tail scenarios). IRR is mathematically undefined for these paths.
+Returning NaN is correct; clean_irr() converts NaN to the -1.0 (total-loss)
+sentinel for downstream portfolio statistics.
+"""
 from __future__ import annotations
 
-import warnings
+import dataclasses
 
 import numpy as np
-import numpy_financial as npf
+from scipy.optimize import brentq
+
+# Bounded search interval for brentq. Evaluated at these endpoints only;
+# no trial rate outside this range can trigger overflow.
+_R_LO = -0.999  # near-total loss; avoids log1p(r) singularity at r=-1
+_R_HI = 10.0    # 1000% return cap (matches clean_irr sentinel)
+
+
+@dataclasses.dataclass
+class IrrDiagnostics:
+    """Lightweight diagnostics from a batch_irr call.
+
+    Attributes:
+        n_computed:      Total number of simulation paths processed.
+        n_no_sign_change: Paths with no sign change in cashflows — IRR is
+                          mathematically undefined; counted before solver call.
+                          Includes total-loss paths (returned as -1.0 sentinel).
+        n_failures:      Paths where NPV had no root in [-0.999, 10.0] or
+                          brentq failed to converge — returned as NaN.
+    """
+    n_computed: int
+    n_no_sign_change: int
+    n_failures: int
+
+
+def _npv_stable(r: float, cashflows: np.ndarray, t: np.ndarray) -> float:
+    """NPV using log1p for numerical stability at large t.
+
+    Replaces (1+r)**t with exp(t*log1p(r)), which avoids overflow for large t
+    (e.g. 30-year projects with a trial r near the upper bracket boundary).
+
+    Valid only for r > -1, which is guaranteed by the brentq interval.
+    """
+    discount = np.exp(t * np.log1p(r))
+    return float(np.sum(cashflows / discount))
 
 
 def _irr_single(cashflows: np.ndarray) -> float:
@@ -12,71 +62,94 @@ def _irr_single(cashflows: np.ndarray) -> float:
 
     Returns:
         IRR as a decimal (e.g. 0.12 for 12%).
-        -1.0 sentinel for total loss (no positive inflows with negative outflow).
-        NaN for undefined (no investment outflow).
-        Uses numpy_financial.irr which picks root closest to zero.
+        -1.0  — total-loss sentinel (negative outflow, zero inflows).
+        NaN   — IRR undefined: no sign change, or no root in [-0.999, 10.0].
     """
-    c0 = cashflows[0]
-    positive_inflows = np.sum(np.maximum(0.0, cashflows[1:]))
+    has_negative = np.any(cashflows < 0.0)
+    has_positive = np.any(cashflows > 0.0)
 
     # No investment outflow → IRR undefined
-    if c0 >= 0.0:
+    if not has_negative:
         return float("nan")
 
-    # No positive inflows at all → total loss
-    if positive_inflows == 0.0:
+    # No positive inflows → total-loss sentinel
+    if not has_positive:
         return -1.0
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        result = npf.irr(cashflows)
-
-    if result is None or np.isnan(result):
-        # Fallback: Newton's method
-        result = _irr_newton(cashflows)
-
-    if np.isinf(result):
-        return 10.0  # cap at 1000%
-
-    return float(result)
-
-
-def _irr_newton(cashflows: np.ndarray, r0: float = 0.10, max_iter: int = 100, tol: float = 1e-8) -> float:
-    """Newton's method fallback for IRR."""
     t = np.arange(len(cashflows), dtype=float)
-    r = r0
-    for _ in range(max_iter):
-        factors = (1.0 + r) ** t
-        npv = np.sum(cashflows / factors)
-        dnpv = np.sum(-t * cashflows / ((1.0 + r) * factors))
-        if dnpv == 0.0:
-            break
-        r_new = r - npv / dnpv
-        if abs(r_new - r) < tol:
-            return float(r_new)
-        r = r_new
-    return float("nan")
+
+    # brentq requires opposite signs at the bracket endpoints.
+    # Compute NPV at both ends of the valid domain.
+    npv_lo = _npv_stable(_R_LO, cashflows, t)
+    npv_hi = _npv_stable(_R_HI, cashflows, t)
+
+    if not np.isfinite(npv_lo) or not np.isfinite(npv_hi):
+        return float("nan")
+
+    if npv_lo * npv_hi > 0.0:
+        # NPV is same sign at both ends — no root inside the interval.
+        return float("nan")
+
+    try:
+        r = brentq(_npv_stable, _R_LO, _R_HI, args=(cashflows, t),
+                   xtol=1e-8, maxiter=100)
+    except ValueError:
+        return float("nan")
+
+    return float(r)
 
 
-def batch_irr(cashflows: np.ndarray) -> np.ndarray:
+def batch_irr(
+    cashflows: np.ndarray,
+    return_diagnostics: bool = False,
+) -> np.ndarray | tuple[np.ndarray, IrrDiagnostics]:
     """Compute IRR for each simulation path.
 
     Args:
         cashflows: Array of shape (n_sims, T) where axis-0 is simulation paths
                    and axis-1 is time periods. cashflows[:, 0] should be
                    negative (investment outflow).
+        return_diagnostics: If True, also return an IrrDiagnostics dataclass
+                   with counts of failures and undefined paths.
 
     Returns:
         irr_vector of shape (n_sims,). Sentinels:
           -1.0  → total loss (no inflows)
-          NaN   → undefined (no outflow at t=0)
-          10.0  → capped at 1000% for practical outliers
+          NaN   → IRR undefined or no root in [-0.999, 10.0]
+          10.0  → capped at 1000% (applied by clean_irr; brentq upper bound)
+
+        If return_diagnostics=True, returns (irr_vector, IrrDiagnostics).
     """
     cashflows = np.asarray(cashflows, dtype=float)
     n_sims = cashflows.shape[0]
     result = np.empty(n_sims, dtype=float)
+
+    n_no_sign_change = 0
+    n_failures = 0
+
     for s in range(n_sims):
-        result[s] = _irr_single(cashflows[s])
+        cf = cashflows[s]
+        has_negative = np.any(cf < 0.0)
+        has_positive = np.any(cf > 0.0)
+
+        if not has_negative or not has_positive:
+            n_no_sign_change += 1
+
+        val = _irr_single(cf)
+        result[s] = val
+
+        if np.isnan(val) and has_negative and has_positive:
+            # Has sign change but solver found no root — bracket miss
+            n_failures += 1
+
+    if return_diagnostics:
+        diag = IrrDiagnostics(
+            n_computed=n_sims,
+            n_no_sign_change=n_no_sign_change,
+            n_failures=n_failures,
+        )
+        return result, diag
+
     return result
 
 
