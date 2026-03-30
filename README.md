@@ -33,24 +33,114 @@ If you're new to blended finance, here's the minimum you need to understand the 
 ### 1. Install
 
 ```bash
-pip install -e ".[dev]"
+pip install -e ".[dev]"       # core + tests
+pip install -e ".[ui]"        # adds Streamlit + Plotly for the web demo
 ```
 
-### 2. Run with built-in sample data
+### 2. Launch the Streamlit demo
+
+```bash
+streamlit run app.py
+```
+
+Opens at **http://localhost:8501**. Sample data (3 vehicles, 9 projects) is pre-loaded — click **Run Calibration** to see results immediately.
+
+### 3. Run with built-in sample data (CLI)
 
 ```bash
 python run_e2e.py
 ```
 
-This runs a two-vehicle, six-project portfolio (East Africa Nature Fund + West Africa Clean Energy Fund) and prints the calibrated catalytic fractions, leverage ratios, and CVaR statistics.
-
-### 3. Run the test suite
+### 4. Run the test suite
 
 ```bash
 pytest
 ```
 
 All tests should pass in under 10 seconds.
+
+---
+
+## Streamlit UI
+
+The web demo has four pages accessible from the sidebar:
+
+| Page | What it does |
+|------|-------------|
+| **Setup** | Choose sample data or upload your own CSVs; configure guarantee, reserve, mezzanine, coupon; run calibration |
+| **Results** | KPI cards (catalytic capital, leverage, IRR, CVaR), vehicle breakdown table, IRR histogram, capital stack chart, alpha chart |
+| **Sensitivity** | Four stress tests (A: guarantee ↑, B: price vol ↑, C: revenue ↓, D: price ↓); comparison table + grouped bar chart |
+| **How It Works** | Conceptual explanation, key terms, CSV format spec, downloadable templates |
+
+### Recommended CSV Format (Format 2)
+
+The UI uses a single standard format: **year/yield/capex/opex with embedded price parameters**.
+
+```csv
+year,yield,capex,opex,revenue_type,base_price,price_growth_rate,price_vol
+2025,0,4000000,100000,carbon,15.0,0.05,0.30
+2026,0,3000000,100000,carbon,15.0,0.05,0.30
+2027,30000,0,200000,carbon,15.0,0.05,0.30
+2028,50000,0,200000,carbon,15.0,0.05,0.30
+```
+
+| Column | Required | Description |
+|--------|----------|-------------|
+| `year` | ✓ | Calendar year (e.g. 2025). Rows with `yield=0` are construction years. |
+| `yield` | ✓ | Physical output / year (tCO₂e, tons, m³). `0` = construction year. |
+| `capex` | ✓ | Capital expenditure (positive = outflow). `0` during operations. |
+| `opex` | ✓ | Operating cost / year (positive = outflow). |
+| `revenue_type` | optional | `"carbon"` or `"commodity"` — UI label only; same math for both. |
+| `base_price` | ✓ | Current price per unit in USD. |
+| `price_growth_rate` | ✓ | Annual log-price drift (e.g. `0.05` = 5 %/yr). |
+| `price_vol` | ✓ | Annual price volatility / GBM σ (e.g. `0.30` = 30 %). |
+
+**Revenue types:**
+- **Carbon** (REDD+, ARR, biochar) — no liquid futures market; enter analyst assumptions for `base_price`, `price_growth_rate`, `price_vol`.
+- **Commodity** (cocoa, timber, water) — use spot/futures data to derive `base_price`, drift, and vol.
+
+**Typical parameters:**
+
+| Project type | Yield units | Base price | Growth | Vol |
+|-------------|------------|-----------|--------|-----|
+| Forestry ARR | tCO₂e / yr | $15 | 5 % | 30 % |
+| REDD+ | tCO₂e / yr | $12 | 6 % | 35 % |
+| Biochar | tons / yr | $130–200 | 4 % | 28 % |
+| Agroforestry (cocoa) | tons / yr | $1,800 | 3 % | 22 % |
+
+### File upload naming convention
+
+Files must be named **`vehiclename_projectname.csv`**. The prefix before the first `_` groups projects into the same vehicle:
+
+```
+forestry_arr.csv        → Forestry vehicle, project 1
+forestry_conservative.csv → Forestry vehicle, project 2
+agro_standard.csv       → Agro vehicle, project 1
+```
+
+### MVP constraints
+
+| Constraint | Limit |
+|-----------|-------|
+| Max vehicles | 3 |
+| Max projects / vehicle | 5 |
+| Max rows per file (years) | 30 |
+| File format | CSV only |
+| Simulations | 100 – 2,000 |
+| Historical price series upload | Post-MVP (use embedded params for now) |
+
+### Sample data
+
+Pre-loaded sample files live in `examples/ui_sample/`:
+
+```
+examples/ui_sample/
+  vehicle_1_forestry/      — 3 ARR/forestry carbon projects
+  vehicle_2_agroforestry/  — 3 cocoa agroforestry projects (commodity)
+  vehicle_3_mixed/         — REDD+, biochar, hybrid (carbon + commodity)
+```
+
+Download templates from the **Setup** or **How It Works** page within the app.
 
 ---
 
