@@ -54,6 +54,13 @@ calibration/
     ├── irr.py         # batch_irr(), clean_irr() with edge-case sentinels
     ├── stats.py       # var(), cvar(), cholesky_correlated_draws()
     └── loaders.py     # load_project_from_excel(), load_price_series()
+
+app.py                 # Streamlit web demo (4 pages: Setup, Results, Sensitivity, How It Works)
+examples/
+└── ui_sample/         # Format 2 CSV sample data for the Streamlit demo
+    ├── vehicle_1_forestry/     (project_forestry_arr, _conservative, _risky)
+    ├── vehicle_2_agroforestry/ (project_agro_standard, _conservative, _volatile)
+    └── vehicle_3_mixed/        (project_mixed_redd, _biochar, _hybrid)
 ```
 
 ---
@@ -86,10 +93,58 @@ tranches or waterfalls.
 ## Setup
 
 ```bash
-pip install -e ".[dev]"
+pip install -e ".[dev]"       # core + tests
+pip install -e ".[ui]"        # adds streamlit + plotly for the web demo
 ```
 
 Dependencies: `numpy`, `scipy`, `numpy-financial`, `cvxpy`, `pydantic`, `pandas`, `pytest`.
+UI extras: `streamlit>=1.32`, `plotly>=5.18`.
+
+## Streamlit UI
+
+```bash
+streamlit run app.py          # opens at http://localhost:8501
+```
+
+The UI has four pages:
+
+| Page | Purpose |
+|------|---------|
+| **Setup** | Load sample portfolio or upload your own CSVs; configure vehicle parameters; run calibration |
+| **Results** | KPI cards (catalytic capital, leverage, IRR, CVaR), vehicle breakdown table, 3 charts |
+| **Sensitivity** | Four stress tests (A: guarantee ↑, B: price vol ↑, C/D: revenue/price ↓); comparison table + chart |
+| **How It Works** | Conceptual explanation, glossary, CSV format spec, template downloads |
+
+### Format 2 CSV (recommended for the UI)
+
+```csv
+year,yield,capex,opex,revenue_type,base_price,price_growth_rate,price_vol
+2025,0,4000000,100000,carbon,15.0,0.05,0.30   ← construction year (yield=0)
+2026,0,3000000,100000,carbon,15.0,0.05,0.30   ← construction year
+2027,30000,0,200000,carbon,15.0,0.05,0.30     ← operating year (yield>0)
+```
+
+- Construction rows (`yield=0`) → `base_cashflows` (capex + opex as negative CFs)
+- Operating rows (`yield>0`) → `base_revenue = yield × base_price`, `base_costs = opex`
+- GBM price shocks applied to revenue only; capex/opex are deterministic pass-throughs
+- `revenue_type` ("carbon" or "commodity") is a UI label only — same math for both
+
+### MVP constraints
+
+| Limit | Value |
+|-------|-------|
+| Max vehicles | 3 |
+| Max projects / vehicle | 5 |
+| Max horizon | 30 years |
+| File format | CSV only |
+| Simulations | 100–2000 |
+
+### File upload naming
+
+Uploaded files must follow `vehiclename_projectname.csv`. The prefix before the first `_`
+determines which vehicle the project belongs to:
+- `forestry_arr.csv` + `forestry_redd.csv` → **Forestry** vehicle (2 projects)
+- `agro_standard.csv` → **Agro** vehicle (1 project)
 
 ---
 

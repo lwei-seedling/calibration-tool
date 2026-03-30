@@ -1,0 +1,692 @@
+"""Streamlit demo — Catalytic Capital Optimizer."""
+from __future__ import annotations
+
+import io
+import tempfile
+import warnings
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
+
+from calibration.portfolio.models import PortfolioInputs
+from calibration.portfolio.optimizer import PortfolioOptimizer
+from calibration.project.models import ProjectInputs
+from calibration.utils.loaders import load_project_from_excel
+from calibration.vehicle.calibration import CalibratorConfig
+from calibration.vehicle.models import VehicleInputs
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+SAMPLE_DIR = Path(__file__).parent / "examples" / "ui_sample"
+REQUIRED_COLS = {"year", "yield", "capex", "opex", "base_price", "price_growth_rate", "price_vol"}
+MAX_VEHICLES = 3
+MAX_PROJECTS_PER_VEHICLE = 5
+MAX_ROWS = 30
+
+TEMPLATE_CARBON = """\
+year,yield,capex,opex,revenue_type,base_price,price_growth_rate,price_vol
+2025,0,3000000,80000,carbon,15.0,0.05,0.30
+2026,0,1500000,80000,carbon,15.0,0.05,0.30
+2027,20000,0,120000,carbon,15.0,0.05,0.30
+2028,35000,0,120000,carbon,15.0,0.05,0.30
+2029,50000,0,120000,carbon,15.0,0.05,0.30
+2030,50000,0,120000,carbon,15.0,0.05,0.30
+2031,50000,0,120000,carbon,15.0,0.05,0.30
+2032,50000,0,120000,carbon,15.0,0.05,0.30
+2033,50000,0,120000,carbon,15.0,0.05,0.30
+2034,50000,0,120000,carbon,15.0,0.05,0.30
+2035,50000,0,120000,carbon,15.0,0.05,0.30
+2036,50000,0,120000,carbon,15.0,0.05,0.30
+2037,50000,0,120000,carbon,15.0,0.05,0.30
+2038,50000,0,120000,carbon,15.0,0.05,0.30
+2039,50000,0,120000,carbon,15.0,0.05,0.30
+2040,50000,0,120000,carbon,15.0,0.05,0.30
+"""
+
+TEMPLATE_COMMODITY = """\
+year,yield,capex,opex,revenue_type,base_price,price_growth_rate,price_vol
+2025,0,4000000,100000,commodity,1800.0,0.03,0.22
+2026,0,2000000,100000,commodity,1800.0,0.03,0.22
+2027,0,500000,150000,commodity,1800.0,0.03,0.22
+2028,5000,0,200000,commodity,1800.0,0.03,0.22
+2029,10000,0,200000,commodity,1800.0,0.03,0.22
+2030,14000,0,200000,commodity,1800.0,0.03,0.22
+2031,17000,0,200000,commodity,1800.0,0.03,0.22
+2032,19000,0,200000,commodity,1800.0,0.03,0.22
+2033,20000,0,200000,commodity,1800.0,0.03,0.22
+2034,20000,0,200000,commodity,1800.0,0.03,0.22
+2035,20000,0,200000,commodity,1800.0,0.03,0.22
+2036,20000,0,200000,commodity,1800.0,0.03,0.22
+2037,20000,0,200000,commodity,1800.0,0.03,0.22
+2038,20000,0,200000,commodity,1800.0,0.03,0.22
+2039,20000,0,200000,commodity,1800.0,0.03,0.22
+2040,20000,0,200000,commodity,1800.0,0.03,0.22
+"""
+
+
+# ---------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------
+
+def validate_df(df: pd.DataFrame, filename: str) -> tuple[list[str], list[str]]:
+    """Return (errors, warnings) for an uploaded Format-2 dataframe."""
+    errors: list[str] = []
+    warns: list[str] = []
+    cols = {str(c).strip().lower() for c in df.columns}
+    missing = REQUIRED_COLS - cols
+    if missing:
+        errors.append(f"Missing columns: {sorted(missing)}. Download a template to see the required format.")
+        return errors, warns
+
+    if len(df) > MAX_ROWS:
+        errors.append(f"Max {MAX_ROWS}-year horizon. File has {len(df)} rows.")
+
+    df2 = df.copy()
+    df2.columns = [str(c).strip().lower() for c in df2.columns]
+
+    num_cols = ["yield", "capex", "opex", "base_price", "price_growth_rate", "price_vol"]
+    for col in num_cols:
+        bad = pd.to_numeric(df2[col], errors="coerce").isna()
+        if bad.any():
+            rows = (df2.index[bad] + 2).tolist()
+            errors.append(f"Non-numeric values in '{col}' at row(s): {rows}.")
+
+    if errors:
+        return errors, warns
+
+    df2[num_cols] = df2[num_cols].apply(pd.to_numeric, errors="coerce")
+
+    if (df2["yield"] <= 0).all():
+        errors.append("No operating rows found (all yield=0). At least one year must have yield>0.")
+    if (df2["base_price"] <= 0).any():
+        errors.append("base_price must be positive ($/unit).")
+
+    if errors:
+        return errors, warns
+
+    if df2["capex"].iloc[0] == 0 and df2["yield"].iloc[0] == 0:
+        warns.append("First year has no capex — unusual for a construction-phase project.")
+    rev = (df2["yield"] * df2["base_price"]).sum()
+    costs = (df2["capex"] + df2["opex"]).sum()
+    if rev < costs:
+        warns.append("At base assumptions total revenues < total costs. May require significant support.")
+    return errors, warns
+
+
+
+# ---------------------------------------------------------------------------
+# Model builders
+# ---------------------------------------------------------------------------
+
+def _capex_sum(projects: list[ProjectInputs]) -> float:
+    total = 0.0
+    for p in projects:
+        if p.base_cashflows is not None:
+            total += abs(sum(cf for cf in p.base_cashflows if cf < 0))
+        elif p.capex:
+            total += p.capex
+    return total
+
+
+def _build_vehicle(
+    projects: list[ProjectInputs],
+    guarantee_coverage: float,
+    grant_reserve_pct: float,
+    mezzanine_fraction: float,
+    senior_coupon: float,
+    off_diag_corr: float,
+) -> VehicleInputs:
+    J = len(projects)
+    corr = [[1.0 if i == j else off_diag_corr for j in range(J)] for i in range(J)]
+    total_capital = max(_capex_sum(projects), 1.0) * 1.2
+    return VehicleInputs(
+        projects=projects,
+        correlation_matrix=corr,
+        total_capital=total_capital,
+        guarantee_coverage=guarantee_coverage,
+        grant_reserve=total_capital * grant_reserve_pct,
+        mezzanine_fraction=mezzanine_fraction,
+        senior_coupon=senior_coupon,
+        mezzanine_coupon=min(senior_coupon + 0.04, 0.20),
+    )
+
+
+def _build_portfolio(
+    vehicles: list[VehicleInputs],
+    n_sims: int,
+    hurdle_irr: float,
+    max_loss_prob: float,
+    cvar_max: float,
+    seed: int,
+    catalytic_budget: float | None,
+) -> PortfolioInputs:
+    total_budget = sum(v.total_capital for v in vehicles)
+    return PortfolioInputs(
+        vehicles=vehicles,
+        calibrator_config=CalibratorConfig(
+            investor_hurdle_irr=hurdle_irr,
+            max_loss_probability=max_loss_prob,
+        ),
+        total_budget=total_budget,
+        catalytic_budget=catalytic_budget if catalytic_budget and catalytic_budget > 0 else None,
+        min_deployment=total_budget * 0.3,
+        max_allocation_fraction=0.70,
+        cvar_confidence=0.95,
+        cvar_max=cvar_max,
+        n_sims=n_sims,
+        seed=seed,
+    )
+
+
+
+# ---------------------------------------------------------------------------
+# Sensitivity
+# ---------------------------------------------------------------------------
+
+def _rebuild_sensitivity(
+    base_inputs: PortfolioInputs,
+    test_id: str,
+    value: float,
+) -> PortfolioInputs:
+    """Return a modified PortfolioInputs for sensitivity test A/B/C/D."""
+    new_vehicles: list[VehicleInputs] = []
+    for v in base_inputs.vehicles:
+        if test_id == "A":
+            new_vehicles.append(v.model_copy(update={"guarantee_coverage": value}))
+        elif test_id == "B":
+            new_projects = [
+                p.model_copy(update={"price_vol": min(p.price_vol * value, 1.0)})
+                for p in v.projects
+            ]
+            new_vehicles.append(v.model_copy(update={"projects": new_projects}))
+        else:  # C or D — scale base_revenue; fall back to scaling positive base_cashflows
+            new_projects = []
+            for p in v.projects:
+                if p.base_revenue is not None:
+                    new_projects.append(
+                        p.model_copy(update={"base_revenue": [r * value for r in p.base_revenue]})
+                    )
+                elif p.base_cashflows is not None:
+                    scaled = [
+                        cf * value if (i > 0 and cf > 0) else cf
+                        for i, cf in enumerate(p.base_cashflows)
+                    ]
+                    new_projects.append(p.model_copy(update={"base_cashflows": scaled}))
+                else:
+                    new_projects.append(p)
+            new_vehicles.append(v.model_copy(update={"projects": new_projects}))
+    return base_inputs.model_copy(update={"vehicles": new_vehicles})
+
+
+
+# ---------------------------------------------------------------------------
+# Charts
+# ---------------------------------------------------------------------------
+
+def chart_irr_histogram(irr_dist: np.ndarray) -> go.Figure:
+    clean = irr_dist[np.isfinite(irr_dist)] * 100
+    nan_pct = (len(irr_dist) - len(clean)) / max(len(irr_dist), 1) * 100
+    median = float(np.median(clean)) if len(clean) else 0.0
+    fig = go.Figure(go.Histogram(x=clean, nbinsx=50, marker_color="#2E86AB", opacity=0.85))
+    fig.add_vline(x=median, line_dash="dash", line_color="#E84855",
+                  annotation_text=f"Median {median:.1f}%", annotation_position="top right")
+    annotations = []
+    if nan_pct > 0.5:
+        annotations.append(dict(text=f"Loss/NaN: {nan_pct:.1f}% of paths",
+                                 x=0.98, y=0.95, xref="paper", yref="paper",
+                                 showarrow=False, font=dict(size=11, color="gray"),
+                                 xanchor="right"))
+    fig.update_layout(title="Portfolio IRR Distribution", xaxis_title="IRR (%)",
+                      yaxis_title="Scenarios", showlegend=False,
+                      height=320, margin=dict(l=40, r=20, t=40, b=40),
+                      annotations=annotations)
+    return fig
+
+
+def chart_capital_stack(result, names: list[str]) -> go.Figure:
+    idxs = sorted(result.allocations.keys())
+    order = sorted(idxs, key=lambda i: result.catalytic_fractions.get(i, 0), reverse=True)
+    vnames = [names[i] for i in order]
+    cat = [result.catalytic_allocations.get(i, 0) / 1e6 for i in order]
+    com = [result.commercial_allocations.get(i, 0) / 1e6 for i in order]
+    fig = go.Figure([
+        go.Bar(name="Catalytic", y=vnames, x=cat, orientation="h",
+               marker_color="#1565C0", text=[f"${v:.1f}M" for v in cat], textposition="inside"),
+        go.Bar(name="Commercial", y=vnames, x=com, orientation="h",
+               marker_color="#2E7D32", text=[f"${v:.1f}M" for v in com], textposition="inside"),
+    ])
+    fig.update_layout(barmode="stack", title="Capital Stack by Vehicle",
+                      xaxis_title="Capital ($M)", height=320,
+                      margin=dict(l=20, r=20, t=40, b=40),
+                      legend=dict(orientation="h", y=1.12))
+    return fig
+
+
+def chart_alpha(result, names: list[str]) -> go.Figure:
+    idxs = sorted(result.allocations.keys())
+    alphas = [result.catalytic_fractions.get(i, 0) * 100 for i in idxs]
+    vnames = [names[i] for i in idxs]
+    colors = ["#2E7D32" if a < 40 else "#F9A825" if a < 60 else "#C62828" for a in alphas]
+    fig = go.Figure(go.Bar(x=vnames, y=alphas, marker_color=colors,
+                            text=[f"{a:.1f}%" for a in alphas], textposition="outside"))
+    fig.update_layout(title="Alpha (Catalytic Fraction) by Vehicle",
+                      yaxis_title="Alpha (%)",
+                      yaxis=dict(range=[0, max(alphas + [10]) * 1.35]),
+                      height=300, margin=dict(l=40, r=20, t=40, b=50),
+                      annotations=[dict(text="Lower alpha = more efficient use of catalytic capital",
+                                        x=0.5, y=-0.20, xref="paper", yref="paper",
+                                        showarrow=False, font=dict(size=11, color="gray"))])
+    return fig
+
+
+
+# ---------------------------------------------------------------------------
+# Page 1: Setup
+# ---------------------------------------------------------------------------
+
+def page_setup(cfg: dict) -> None:
+    st.header("Portfolio Setup")
+
+    src = st.radio("Data source", ["Sample Portfolio", "Upload Your Own Data"], horizontal=True)
+
+    if src == "Sample Portfolio":
+        st.success("3 vehicles pre-loaded: **Forestry** | **Agroforestry** | **Mixed**")
+        all_projects: list[list[ProjectInputs]] = []
+        all_names: list[str] = []
+        for subdir in sorted(p for p in SAMPLE_DIR.iterdir() if p.is_dir()):
+            files = sorted(subdir.glob("project_*.csv"))[:MAX_PROJECTS_PER_VEHICLE]
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                projs = [load_project_from_excel(f) for f in files]
+            vname = "_".join(subdir.name.split("_")[2:]).replace("_", " ").title()
+            all_projects.append(projs)
+            all_names.append(vname)
+            with st.expander(f"Preview: {vname}"):
+                for f in files:
+                    st.caption(f.name)
+                    st.dataframe(pd.read_csv(f).head(5), use_container_width=True)
+        st.session_state["_projects"] = all_projects
+        st.session_state["_names"] = all_names
+        st.session_state["_data_ok"] = True
+
+    else:
+        c1, c2 = st.columns(2)
+        c1.download_button("Download Carbon Template", TEMPLATE_CARBON,
+                           "template_carbon.csv", "text/csv")
+        c2.download_button("Download Commodity Template", TEMPLATE_COMMODITY,
+                           "template_commodity.csv", "text/csv")
+        st.caption("Name files **vehiclename_projectname.csv** "
+                   "(e.g. `forestry_arr.csv` + `forestry_redd.csv` → **Forestry** vehicle)")
+        uploaded = st.file_uploader("Upload project CSVs", type=["csv"],
+                                    accept_multiple_files=True)
+        if uploaded:
+            groups: dict[str, list[ProjectInputs]] = {}
+            rows = []
+            for uf in uploaded:
+                vname = Path(uf.name).stem.split("_")[0].title()
+                try:
+                    df = pd.read_csv(io.BytesIO(uf.read()))
+                except Exception as exc:
+                    rows.append({"File": uf.name, "Vehicle": vname,
+                                 "Status": "❌ Error", "Notes": str(exc)})
+                    continue
+                errs, wrns = validate_df(df, uf.name)
+                if errs:
+                    rows.append({"File": uf.name, "Vehicle": vname,
+                                 "Status": "❌ Error", "Notes": "; ".join(errs)})
+                    continue
+                with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
+                    df.to_csv(tmp.name, index=False)
+                    tmp_path = tmp.name
+                try:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        proj = load_project_from_excel(tmp_path)
+                    Path(tmp_path).unlink(missing_ok=True)
+                except Exception as exc:
+                    rows.append({"File": uf.name, "Vehicle": vname,
+                                 "Status": "❌ Error", "Notes": f"Load error: {exc}"})
+                    continue
+                groups.setdefault(vname, []).append(proj)
+                note = "; ".join(wrns) if wrns else ""
+                rows.append({"File": uf.name, "Vehicle": vname,
+                             "Status": "⚠ Warning" if wrns else "✓ OK", "Notes": note})
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            vnames = list(groups.keys())[:MAX_VEHICLES]
+            if len(groups) > MAX_VEHICLES:
+                st.warning(f"First {MAX_VEHICLES} vehicles used (MVP limit).")
+            all_projects = [groups[n][:MAX_PROJECTS_PER_VEHICLE] for n in vnames]
+            st.session_state["_projects"] = all_projects
+            st.session_state["_names"] = vnames
+            st.session_state["_data_ok"] = bool(all_projects)
+            if all_projects:
+                st.info("Vehicles: " + " | ".join(
+                    f"**{n}** ({len(groups[n][:MAX_PROJECTS_PER_VEHICLE])} project(s))"
+                    for n in vnames))
+        else:
+            st.session_state["_data_ok"] = False
+
+    st.divider()
+    with st.expander("Vehicle Configuration (all vehicles)", expanded=True):
+        c1, c2, c3 = st.columns(3)
+        cfg["guarantee"] = c1.slider("Guarantee Coverage", 0, 60, 25, format="%d%%") / 100
+        cfg["reserve_pct"] = c1.slider("Grant Reserve", 0, 15, 5, format="%d%% of capital") / 100
+        cfg["mezz_frac"] = c2.slider("Mezzanine Fraction", 0, 30, 10, format="%d%%") / 100
+        cfg["senior_coupon"] = c2.slider("Senior Coupon", 5, 15, 8, format="%d%%") / 100
+        cfg["corr"] = c3.slider("Off-diagonal Correlation", 0.0, 0.8, 0.30, step=0.05)
+
+    c1, c2, c3 = st.columns(3)
+    projs_stored = st.session_state.get("_projects", [])
+    auto_budget = sum(_capex_sum(p) for p in projs_stored) * 1.2 / 1e6 if projs_stored else 30.0
+    cfg["cat_budget"] = c2.number_input("Catalytic Budget $M (optional)", 0.0, step=0.5,
+                                         help="Leave 0 for no separate catalytic cap") * 1e6
+    cfg["cvar_max"] = c3.slider("CVaR Limit", 10, 60, 35, format="%d%%") / 100
+
+    data_ok = st.session_state.get("_data_ok", False)
+    if st.button("Run Calibration", type="primary", disabled=not data_ok,
+                 use_container_width=True):
+        stored_projects = st.session_state["_projects"]
+        stored_names = st.session_state["_names"]
+        vehicles = [
+            _build_vehicle(projs, cfg["guarantee"], cfg["reserve_pct"],
+                           cfg["mezz_frac"], cfg["senior_coupon"], cfg["corr"])
+            for projs in stored_projects
+        ]
+        inputs = _build_portfolio(vehicles, cfg["n_sims"], cfg["hurdle_irr"],
+                                   cfg["max_loss_prob"], cfg["cvar_max"],
+                                   cfg["seed"], cfg["cat_budget"] or None)
+        with st.spinner("Calibrating vehicles and optimising portfolio… (30–90 s)"):
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    result = PortfolioOptimizer(inputs).run()
+                st.session_state.update({"result": result, "inputs": inputs,
+                                         "names": stored_names})
+                st.success("Done — open the Results page.")
+            except Exception as exc:
+                st.error(f"Calibration failed: {exc}")
+
+
+
+# ---------------------------------------------------------------------------
+# Page 2: Results
+# ---------------------------------------------------------------------------
+
+def _export_csv(result, names: list[str]) -> str:
+    rows = []
+    for i, name in enumerate(names):
+        rows.append({"vehicle": name,
+                     "allocation_usd": result.allocations.get(i, 0),
+                     "catalytic_usd": result.catalytic_allocations.get(i, 0),
+                     "commercial_usd": result.commercial_allocations.get(i, 0),
+                     "alpha": result.catalytic_fractions.get(i, 0),
+                     "leverage_x": result.marginal_catalytic_efficiency.get(i, 0)})
+    rows.append({"vehicle": "PORTFOLIO",
+                 "allocation_usd": sum(result.allocations.values()),
+                 "catalytic_usd": sum(result.catalytic_allocations.values()),
+                 "commercial_usd": sum(result.commercial_allocations.values()),
+                 "alpha": "", "leverage_x": result.leverage_ratio})
+    return pd.DataFrame(rows).to_csv(index=False)
+
+
+def page_results() -> None:
+    st.header("Results Dashboard")
+    result = st.session_state.get("result")
+    inputs = st.session_state.get("inputs")
+    names: list[str] = st.session_state.get("names", [])
+    if result is None:
+        st.info("No results yet — go to **Setup** and run calibration first.")
+        return
+
+    ch, ci, ce = st.columns([4, 2, 1])
+    icon = "✓" if result.status == "optimal" else "⚠"
+    ch.subheader(f"{icon} {result.status.title()}  ·  {inputs.n_sims:,} sims  ·  seed {inputs.seed}")
+    ce.download_button("Export CSV", _export_csv(result, names),
+                       "results.csv", "text/csv")
+
+    total_cat = sum(result.catalytic_allocations.values())
+    total_dep = sum(result.allocations.values())
+    irr_clean = result.portfolio_irr_distribution[np.isfinite(result.portfolio_irr_distribution)]
+    median_irr = float(np.median(irr_clean)) if len(irr_clean) else float("nan")
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Catalytic Capital",
+              f"${total_cat/1e6:.1f}M",
+              f"{total_cat/max(total_dep,1):.1%} of deployed")
+    k2.metric("Portfolio Leverage", f"{result.leverage_ratio:.2f}×",
+              "commercial per catalytic $")
+    k3.metric("Median IRR", f"{median_irr:.1%}" if np.isfinite(median_irr) else "N/A")
+    k4.metric("CVaR (95%)", f"{result.cvar_95:.1%}")
+
+    st.divider()
+    st.subheader("Vehicle Breakdown")
+    rows = []
+    for i, name in enumerate(names):
+        cat = result.catalytic_allocations.get(i, 0)
+        com = result.commercial_allocations.get(i, 0)
+        rows.append({"Vehicle": name,
+                     "Allocation": f"${result.allocations.get(i,0)/1e6:.1f}M",
+                     "Alpha": f"{result.catalytic_fractions.get(i,0):.1%}",
+                     "Catalytic": f"${cat/1e6:.1f}M",
+                     "Commercial": f"${com/1e6:.1f}M",
+                     "Leverage": f"{com/max(cat,1):.1f}×",
+                     "Marg. Eff.": f"{result.marginal_catalytic_efficiency.get(i,0):.1f}×"})
+    rows.sort(key=lambda r: float(r["Leverage"].replace("×", "")), reverse=True)
+    st.dataframe(pd.DataFrame(rows).set_index("Vehicle"), use_container_width=True)
+
+    cl, cr = st.columns(2)
+    with cl:
+        st.plotly_chart(chart_irr_histogram(result.portfolio_irr_distribution),
+                        use_container_width=True)
+    with cr:
+        st.plotly_chart(chart_capital_stack(result, names), use_container_width=True)
+    st.plotly_chart(chart_alpha(result, names), use_container_width=True)
+
+
+
+# ---------------------------------------------------------------------------
+# Page 3: Sensitivity
+# ---------------------------------------------------------------------------
+
+def _sens_comparison(base, mod, names: list[str], label: str) -> None:
+    b_irr = base.portfolio_irr_distribution
+    m_irr = mod.portfolio_irr_distribution
+    bm = float(np.median(b_irr[np.isfinite(b_irr)])) if np.any(np.isfinite(b_irr)) else float("nan")
+    mm = float(np.median(m_irr[np.isfinite(m_irr)])) if np.any(np.isfinite(m_irr)) else float("nan")
+    ba = float(np.mean(list(base.catalytic_fractions.values())))
+    ma = float(np.mean(list(mod.catalytic_fractions.values())))
+    rows = [
+        {"Metric": "Mean Alpha", "Base": f"{ba:.1%}", "Modified": f"{ma:.1%}",
+         "Δ": f"{(ma-ba)*100:+.1f} pp"},
+        {"Metric": "Portfolio Leverage", "Base": f"{base.leverage_ratio:.2f}×",
+         "Modified": f"{mod.leverage_ratio:.2f}×",
+         "Δ": f"{mod.leverage_ratio-base.leverage_ratio:+.2f}×"},
+        {"Metric": "Median IRR",
+         "Base": f"{bm:.1%}" if np.isfinite(bm) else "N/A",
+         "Modified": f"{mm:.1%}" if np.isfinite(mm) else "N/A",
+         "Δ": f"{(mm-bm)*100:+.1f} pp" if np.isfinite(bm) and np.isfinite(mm) else "—"},
+        {"Metric": "CVaR 95%", "Base": f"{base.cvar_95:.1%}",
+         "Modified": f"{mod.cvar_95:.1%}",
+         "Δ": f"{(mod.cvar_95-base.cvar_95)*100:+.1f} pp"},
+    ]
+    st.dataframe(pd.DataFrame(rows).set_index("Metric"), use_container_width=True)
+    idxs = sorted(base.catalytic_fractions.keys())
+    fig = go.Figure([
+        go.Bar(name="Base", x=[names[i] for i in idxs],
+               y=[base.catalytic_fractions[i]*100 for i in idxs], marker_color="#1565C0"),
+        go.Bar(name=label, x=[names[i] for i in idxs],
+               y=[mod.catalytic_fractions[i]*100 for i in idxs], marker_color="#EF6C00"),
+    ])
+    fig.update_layout(barmode="group", yaxis_title="Alpha (%)", height=300,
+                      title=f"Alpha: Base vs {label}",
+                      margin=dict(l=40, r=20, t=40, b=40))
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def page_sensitivity() -> None:
+    st.header("Sensitivity Analysis")
+    base_result = st.session_state.get("result")
+    base_inputs = st.session_state.get("inputs")
+    names: list[str] = st.session_state.get("names", [])
+    if base_result is None:
+        st.info("Run calibration first (Setup page).")
+        return
+
+    test = st.radio("Select test", [
+        "A: Higher guarantee coverage",
+        "B: Higher price volatility",
+        "C: Lower operating cashflows",
+        "D: Lower base price",
+    ])
+    tid = test[0]
+
+    ca, cb = st.columns([1, 2])
+    with ca:
+        if tid == "A":
+            base_g = base_inputs.vehicles[0].guarantee_coverage
+            new_g = st.slider("New guarantee (%)", 0, 60, min(int(base_g*100)+20, 60), 5) / 100
+            val, lbl = new_g, f"{base_g:.0%} → {new_g:.0%}"
+        elif tid == "B":
+            mult = st.slider("Vol multiplier", 1.0, 3.0, 2.0, 0.1)
+            avg = float(np.mean([p.price_vol for v in base_inputs.vehicles for p in v.projects]))
+            val, lbl = mult, f"{avg:.0%} avg → {avg*mult:.0%} avg (×{mult:.1f})"
+        else:
+            scale = st.slider("Scale factor", 0.50, 1.00, 0.80, 0.05)
+            val, lbl = scale, f"100% → {scale:.0%}"
+    with cb:
+        st.info(f"**{lbl}**")
+
+    if st.button("Run Sensitivity", type="primary"):
+        mod_inputs = _rebuild_sensitivity(base_inputs, tid, val)
+        with st.spinner("Running modified scenario…"):
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    mod_result = PortfolioOptimizer(mod_inputs).run()
+                st.subheader(f"Comparison: Base vs {lbl}")
+                _sens_comparison(base_result, mod_result, names, lbl)
+            except Exception as exc:
+                st.error(f"Sensitivity run failed: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Page 4: How It Works
+# ---------------------------------------------------------------------------
+
+def page_how_it_works() -> None:
+    st.header("How It Works")
+    st.markdown("""
+## Blended Finance & Catalytic Capital
+
+**Catalytic capital** (grants, first-loss equity, DFI guarantees) absorbs downside risk so
+commercial investors can participate in high-impact projects they would otherwise find too risky.
+
+**α (Alpha)** = the minimum share of a vehicle's total capital that must be concessional.
+*Lower α = more efficient use of catalytic capital.*
+
+## Pipeline
+
+```
+Project CSVs  →  Monte Carlo (GBM price paths)  →  Vehicle calibration  →  Portfolio LP
+```
+
+1. **Project** — each CSV is one investment. Revenue = Yield × Price × GBM shock per year.
+2. **Vehicle** — pools projects; capital stack absorbs losses: Grant Reserve → First-Loss →
+   Mezzanine → Guarantee → Senior. Calibrator finds minimum α so senior lenders earn ≥ hurdle IRR.
+3. **Portfolio** — LP maximises commercial capital mobilised subject to CVaR tail-risk constraint.
+
+## CSV Format (Format 2)
+
+| Column | Required | Description |
+|--------|----------|-------------|
+| `year` | ✓ | Calendar year. Construction rows: yield = 0. |
+| `yield` | ✓ | Physical output / year (tCO2e, tons, m³). 0 = construction. |
+| `capex` | ✓ | Capital expenditure (positive = outflow). 0 during operations. |
+| `opex` | ✓ | Operating cost / year (positive = outflow). |
+| `revenue_type` | optional | "carbon" or "commodity" — label only, same math. |
+| `base_price` | ✓ | Current price per unit (USD). |
+| `price_growth_rate` | ✓ | Annual log-price drift (e.g. 0.05 = 5 %/yr). |
+| `price_vol` | ✓ | Annual price volatility (e.g. 0.30 = 30 %). |
+
+**Revenue types:**
+- **Commodity** (cocoa, timber, water) — use spot/futures data for base price, drift, vol.
+- **Carbon** (REDD+, ARR, biochar) — assumption-based; no liquid futures market.
+Same columns, same GBM math. The label is for your reference only.
+
+## Typical Parameters
+
+| Project type | Yield units | Base price | Growth | Vol |
+|-------------|------------|-----------|--------|-----|
+| Forestry ARR | tCO2e / yr | $15 | 5 % | 30 % |
+| REDD+ | tCO2e / yr | $12 | 6 % | 35 % |
+| Biochar | tons / yr | $130–200 | 4 % | 28 % |
+| Agroforestry (cocoa) | tons / yr | $1,800 | 3 % | 22 % |
+
+## Run Time
+~30–90 s for 1,000 simulations with 3 vehicles (3–5 projects each).
+""")
+    c1, c2 = st.columns(2)
+    c1.download_button("Carbon Template (REDD+, ARR, biochar)",
+                       TEMPLATE_CARBON, "template_carbon.csv", "text/csv")
+    c2.download_button("Commodity Template (agroforestry, timber)",
+                       TEMPLATE_COMMODITY, "template_commodity.csv", "text/csv")
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    st.set_page_config(page_title="Catalytic Capital Optimizer",
+                       page_icon="🌿", layout="wide",
+                       initial_sidebar_state="expanded")
+
+    with st.sidebar:
+        st.title("🌿 Catalytic Capital")
+        st.divider()
+        page = st.radio("Navigate", ["Setup", "Results", "Sensitivity", "How It Works"],
+                        format_func=lambda p: {
+                            "Setup": "📁  Setup",
+                            "Results": "📊  Results",
+                            "Sensitivity": "🔬  Sensitivity",
+                            "How It Works": "ℹ️  How It Works",
+                        }[p])
+        st.divider()
+        st.subheader("Run Settings")
+        n_sims = st.slider("Simulations", 100, 2000, 500, 100)
+        hurdle = st.slider("Hurdle IRR", 4, 15, 7, format="%d%%") / 100
+        max_loss = st.slider("Max Loss Prob", 2, 20, 8, format="%d%%") / 100
+        seed = int(st.number_input("Seed", value=42, min_value=0, max_value=99999))
+        if st.session_state.get("result"):
+            st.divider()
+            status = st.session_state["result"].status
+            st.success(f"Last run: {status}") if status == "optimal" else st.warning(f"Last run: {status}")
+
+    cfg = {"n_sims": n_sims, "hurdle_irr": hurdle, "max_loss_prob": max_loss, "seed": seed,
+           "guarantee": 0.25, "reserve_pct": 0.05, "mezz_frac": 0.10,
+           "senior_coupon": 0.08, "corr": 0.30, "cvar_max": 0.35, "cat_budget": None}
+
+    if page == "Setup":
+        page_setup(cfg)
+    elif page == "Results":
+        page_results()
+    elif page == "Sensitivity":
+        page_sensitivity()
+    else:
+        page_how_it_works()
+
+
+if __name__ == "__main__":
+    main()
+
+
+
+
+
+
+
