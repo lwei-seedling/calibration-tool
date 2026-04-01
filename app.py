@@ -309,7 +309,7 @@ def page_setup(cfg: dict) -> None:
             with st.expander(f"Preview: {vname}"):
                 for f in files:
                     st.caption(f.name)
-                    st.dataframe(pd.read_csv(f).head(5), use_container_width=True)
+                    st.dataframe(pd.read_csv(f).head(5))
         st.session_state["_projects"] = all_projects
         st.session_state["_names"] = all_names
         st.session_state["_data_ok"] = True
@@ -356,7 +356,7 @@ def page_setup(cfg: dict) -> None:
                 note = "; ".join(wrns) if wrns else ""
                 rows.append({"File": uf.name, "Vehicle": vname,
                              "Status": "⚠ Warning" if wrns else "✓ OK", "Notes": note})
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(rows), hide_index=True)
             vnames = list(groups.keys())[:MAX_VEHICLES]
             if len(groups) > MAX_VEHICLES:
                 st.warning(f"First {MAX_VEHICLES} vehicles used (MVP limit).")
@@ -388,8 +388,7 @@ def page_setup(cfg: dict) -> None:
     cfg["cvar_max"] = c3.slider("CVaR Limit", 10, 60, 35, format="%d%%") / 100
 
     data_ok = st.session_state.get("_data_ok", False)
-    if st.button("Run Calibration", type="primary", disabled=not data_ok,
-                 use_container_width=True):
+    if st.button("Run Calibration", type="primary", disabled=not data_ok):
         stored_projects = st.session_state["_projects"]
         stored_names = st.session_state["_names"]
         vehicles = [
@@ -477,15 +476,14 @@ def page_results() -> None:
                      "Leverage": f"{com/max(cat,1):.1f}×",
                      "Marg. Eff.": f"{result.marginal_catalytic_efficiency.get(i,0):.1f}×"})
     rows.sort(key=lambda r: float(r["Leverage"].replace("×", "")), reverse=True)
-    st.dataframe(pd.DataFrame(rows).set_index("Vehicle"), use_container_width=True)
+    st.dataframe(pd.DataFrame(rows).set_index("Vehicle"))
 
     cl, cr = st.columns(2)
     with cl:
-        st.plotly_chart(chart_irr_histogram(result.portfolio_irr_distribution),
-                        use_container_width=True)
+        st.plotly_chart(chart_irr_histogram(result.portfolio_irr_distribution))
     with cr:
-        st.plotly_chart(chart_capital_stack(result, names), use_container_width=True)
-    st.plotly_chart(chart_alpha(result, names), use_container_width=True)
+        st.plotly_chart(chart_capital_stack(result, names))
+    st.plotly_chart(chart_alpha(result, names))
 
 
 
@@ -514,7 +512,7 @@ def _sens_comparison(base, mod, names: list[str], label: str) -> None:
          "Modified": f"{mod.cvar_95:.1%}",
          "Δ": f"{(mod.cvar_95-base.cvar_95)*100:+.1f} pp"},
     ]
-    st.dataframe(pd.DataFrame(rows).set_index("Metric"), use_container_width=True)
+    st.dataframe(pd.DataFrame(rows).set_index("Metric"))
     idxs = sorted(base.catalytic_fractions.keys())
     fig = go.Figure([
         go.Bar(name="Base", x=[names[i] for i in idxs],
@@ -525,7 +523,7 @@ def _sens_comparison(base, mod, names: list[str], label: str) -> None:
     fig.update_layout(barmode="group", yaxis_title="Alpha (%)", height=300,
                       title=f"Alpha: Base vs {label}",
                       margin=dict(l=40, r=20, t=40, b=40))
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig)
 
 
 def page_sensitivity() -> None:
