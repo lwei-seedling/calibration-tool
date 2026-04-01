@@ -19,6 +19,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=7.4", "pytest-cov"]
 ui = ["streamlit>=1.32", "plotly>=5.18"]
+codex = ["openai>=1.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

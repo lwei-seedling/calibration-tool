@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import os
 import tempfile
 import warnings
 from pathlib import Path
@@ -638,6 +639,101 @@ Same columns, same GBM math. The label is for your reference only.
 
 
 # ---------------------------------------------------------------------------
+# Code Review page
+# ---------------------------------------------------------------------------
+
+def page_code_review() -> None:
+    st.header("AI Code Review")
+    st.markdown(
+        "Uses the OpenAI API to review the calibration tool's core source files "
+        "for mathematical errors, edge cases, and numerical stability issues — "
+        "a second model's perspective on the implementation."
+    )
+
+    try:
+        from calibration.plugins.openai_codex import CodexReviewer  # noqa: PLC0415
+    except ImportError:
+        st.error(
+            "The `openai` package is not installed. "
+            "Run: `pip install 'calibration-tool[codex]'`"
+        )
+        return
+
+    with st.form("codex_form"):
+        api_key = st.text_input(
+            "OpenAI API Key",
+            type="password",
+            value=os.environ.get("OPENAI_API_KEY", ""),
+            help="Or set the OPENAI_API_KEY environment variable before launching.",
+        )
+        model = st.selectbox("Model", ["gpt-4o", "gpt-4-turbo", "gpt-4"], index=0)
+        files_to_review = st.multiselect(
+            "Files to review",
+            options=CodexReviewer.DEFAULT_FILES,
+            default=CodexReviewer.DEFAULT_FILES,
+        )
+        submitted = st.form_submit_button("Run Code Review", type="primary")
+
+    if not submitted:
+        return
+
+    if not api_key:
+        st.error("An OpenAI API key is required.")
+        return
+
+    if not files_to_review:
+        st.warning("No files selected.")
+        return
+
+    with st.spinner(f"Reviewing {len(files_to_review)} file(s) via OpenAI API…"):
+        try:
+            reviewer = CodexReviewer(model=model, files=files_to_review, api_key=api_key)
+            result = reviewer.review()
+        except RuntimeError as exc:
+            st.error(str(exc))
+            return
+
+    criticals = [f for f in result.findings if f.severity == "critical"]
+    warnings_  = [f for f in result.findings if f.severity == "warning"]
+    infos      = [f for f in result.findings if f.severity == "info"]
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Files reviewed", len(result.files_reviewed))
+    c2.metric("Critical", len(criticals))
+    c3.metric("Warnings", len(warnings_))
+    c4.metric("Info", len(infos))
+
+    if result.errors:
+        with st.expander(f"Errors ({len(result.errors)})", expanded=False):
+            for err in result.errors:
+                st.warning(err)
+
+    if not result.findings:
+        st.success("No issues found.")
+        return
+
+    for label, group, color in (
+        ("Critical", criticals, "red"),
+        ("Warnings", warnings_, "orange"),
+        ("Info", infos, "blue"),
+    ):
+        if not group:
+            continue
+        with st.expander(f"{label} ({len(group)})", expanded=(label == "Critical")):
+            for finding in group:
+                hint = f" — line {finding.line_hint}" if finding.line_hint else ""
+                st.markdown(
+                    f"**`{finding.file}`{hint}** `[{finding.category}]`\n\n"
+                    f"{finding.description}"
+                )
+                st.divider()
+
+    st.caption(
+        f"Model: {result.model_used}  |  Tokens used: {result.total_tokens_used:,}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -649,12 +745,13 @@ def main() -> None:
     with st.sidebar:
         st.title("🌿 Catalytic Capital")
         st.divider()
-        page = st.radio("Navigate", ["Setup", "Results", "Sensitivity", "How It Works"],
+        page = st.radio("Navigate", ["Setup", "Results", "Sensitivity", "How It Works", "Code Review"],
                         format_func=lambda p: {
                             "Setup": "📁  Setup",
                             "Results": "📊  Results",
                             "Sensitivity": "🔬  Sensitivity",
                             "How It Works": "ℹ️  How It Works",
+                            "Code Review": "🤖  Code Review",
                         }[p])
         st.divider()
         st.subheader("Run Settings")
@@ -677,6 +774,8 @@ def main() -> None:
         page_results()
     elif page == "Sensitivity":
         page_sensitivity()
+    elif page == "Code Review":
+        page_code_review()
     else:
         page_how_it_works()
 
