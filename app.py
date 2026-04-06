@@ -285,6 +285,153 @@ def chart_alpha(result, names: list[str]) -> go.Figure:
     return fig
 
 
+def chart_cashflows(inputs, names: list[str]) -> list[go.Figure]:
+    """One Plotly figure per vehicle showing base-case annual cashflow breakdown.
+
+    Bars show capital costs (construction), operating costs, and revenue.
+    A line overlay shows the net cashflow per period.
+    x-axis uses relative period labels (Yr 0, Yr 1, …) because calendar years
+    are not preserved through the ProjectInputs data model.
+    """
+    figs = []
+    for vehicle, vname in zip(inputs.vehicles, names):
+        max_periods = 0
+        for p in vehicle.projects:
+            if p.base_cashflows and p.base_revenue:
+                max_periods = max(max_periods, len(p.base_cashflows) + len(p.base_revenue))
+            elif p.base_cashflows:
+                max_periods = max(max_periods, len(p.base_cashflows))
+            elif p.lifetime_years:
+                max_periods = max(max_periods, p.lifetime_years + 1)
+        if max_periods == 0:
+            continue
+
+        labels = [f"Yr {i}" for i in range(max_periods)]
+        agg_capex = np.zeros(max_periods)
+        agg_opex  = np.zeros(max_periods)
+        agg_rev   = np.zeros(max_periods)
+
+        for p in vehicle.projects:
+            if p.base_cashflows:
+                n_const = len(p.base_cashflows)
+                for t, cf in enumerate(p.base_cashflows):
+                    if t < max_periods and cf < 0:
+                        agg_capex[t] += cf   # already negative
+                for t, rev in enumerate(p.base_revenue or []):
+                    idx = n_const + t
+                    if idx < max_periods:
+                        agg_rev[idx] += rev
+                for t, cost in enumerate(p.base_costs or []):
+                    idx = n_const + t
+                    if idx < max_periods:
+                        agg_opex[idx] -= cost  # flip to negative
+
+        net = agg_capex + agg_opex + agg_rev
+        fig = go.Figure()
+        fig.add_trace(go.Bar(name="Capital costs", x=labels, y=agg_capex.tolist(),
+                             marker_color="#B71C1C"))
+        fig.add_trace(go.Bar(name="Operating costs", x=labels, y=agg_opex.tolist(),
+                             marker_color="#EF9A9A"))
+        fig.add_trace(go.Bar(name="Revenue (base)", x=labels, y=agg_rev.tolist(),
+                             marker_color="#2E7D32"))
+        fig.add_trace(go.Scatter(name="Net CF", x=labels, y=net.tolist(),
+                                 mode="lines+markers",
+                                 line=dict(color="#1565C0", width=2),
+                                 marker=dict(size=5)))
+        fig.update_layout(
+            title=f"{vname} — Base-Case Cashflows (pre-Monte Carlo)",
+            barmode="relative",
+            xaxis_title="Period",
+            yaxis_title="Cashflow (USD)",
+            height=360,
+            margin=dict(l=50, r=20, t=45, b=40),
+            legend=dict(orientation="h", y=1.14),
+        )
+        figs.append((vname, fig))
+    return figs
+
+
+# ---------------------------------------------------------------------------
+# Results commentary helpers
+# ---------------------------------------------------------------------------
+
+def _effective_horizon(inputs) -> int:
+    """Max project lifetime (years) across all vehicles."""
+    max_lt = 0
+    for v in inputs.vehicles:
+        for p in v.projects:
+            lt = p.lifetime_years
+            if lt is None:
+                if p.base_cashflows and p.base_revenue:
+                    lt = len(p.base_cashflows) + len(p.base_revenue) - 1
+                elif p.base_cashflows:
+                    lt = len(p.base_cashflows) - 1
+                else:
+                    lt = 10
+            max_lt = max(max_lt, lt)
+    return max_lt
+
+
+def _vehicle_commentary(name: str, alpha: float, leverage: float, hurdle: float,
+                         median_irr: float, cvar: float, n_sims: int) -> str:
+    conc_pct = f"{alpha:.0%}"
+    lev_str  = f"{leverage:.1f}\u00d7"
+
+    if alpha < 0.20:
+        eff_note = ("This is a capital-efficient structure — most of the return comes from "
+                    "commercial sources with limited concessional support.")
+    elif alpha < 0.40:
+        eff_note = "A reasonable catalytic requirement for this asset class and risk profile."
+    else:
+        eff_note = ("This vehicle has a high concessional requirement. Consider increasing "
+                    "guarantee coverage or grant reserves to reduce the catalytic fraction.")
+
+    if np.isfinite(median_irr):
+        verdict = "meets" if median_irr >= hurdle else "falls short of"
+        irr_line = (f"The modelled median senior IRR is **{median_irr:.1%}**, which {verdict} "
+                    f"the **{hurdle:.1%}** commercial hurdle rate.")
+    else:
+        irr_line = ("Insufficient profitable simulation paths to report a reliable median IRR — "
+                    "review the project revenue and cost assumptions.")
+
+    return (
+        f"**{name}** requires **{conc_pct}** of its capital to be concessional "
+        f"(first-loss, grants, or guarantees), attracting **{lev_str} of commercial capital** "
+        f"per $1 of catalytic funding. "
+        f"{irr_line} "
+        f"Tail-loss risk (CVaR\u2085) is **{cvar:.1%}** of vehicle value in the worst 5% of "
+        f"{n_sims:,} simulated scenarios. {eff_note}"
+    )
+
+
+def _portfolio_commentary(result, inputs, names: list[str]) -> str:
+    total_cat = sum(result.catalytic_allocations.values())
+    total_com = sum(result.commercial_allocations.values())
+    n_active  = sum(1 for a in result.allocations.values() if a > 0)
+    lev       = result.leverage_ratio
+    cvar      = result.cvar_95
+    hurdle    = inputs.calibrator_config.investor_hurdle_irr
+    horizon   = _effective_horizon(inputs)
+
+    if cvar < 0.15:
+        risk_note = "Portfolio tail risk is within conservative bounds."
+    elif cvar < 0.30:
+        risk_note = "Portfolio tail risk is moderate — within typical blended-finance tolerances."
+    else:
+        risk_note = ("Portfolio tail risk is elevated. Consider tightening the CVaR constraint "
+                     "or adjusting the vehicle mix.")
+
+    return (
+        f"Across {n_active} active vehicle(s), **${total_cat/1e6:.1f}M of catalytic capital "
+        f"mobilises ${total_com/1e6:.1f}M of commercial investment** (portfolio leverage: "
+        f"**{lev:.1f}\u00d7**). "
+        f"All senior tranches were calibrated to a **{hurdle:.1%} IRR hurdle** over a "
+        f"**{horizon}-year** investment horizon. "
+        f"The blended portfolio CVaR\u2085 is **{cvar:.1%}** — the expected loss rate "
+        f"in the worst 5% of simulated scenarios. {risk_note}"
+    )
+
+
 
 # ---------------------------------------------------------------------------
 # Page 1: Setup
@@ -444,9 +591,20 @@ def page_results() -> None:
         st.info("No results yet — go to **Setup** and run calibration first.")
         return
 
+    # --- Calibration context bar (Enhancement B) ---
+    hurdle    = inputs.calibrator_config.investor_hurdle_irr
+    max_loss  = inputs.calibrator_config.max_loss_probability
+    horizon   = _effective_horizon(inputs)
+    st.info(
+        f"**Calibration parameters:** {hurdle:.0%} IRR hurdle for senior investors  ·  "
+        f"≤{max_loss:.0%} max senior loss probability  ·  "
+        f"{inputs.n_sims:,} Monte Carlo simulations  ·  "
+        f"**Investment horizon:** {horizon} years"
+    )
+
     ch, ci, ce = st.columns([4, 2, 1])
     icon = "✓" if result.status == "optimal" else "⚠"
-    ch.subheader(f"{icon} {result.status.title()}  ·  {inputs.n_sims:,} sims  ·  seed {inputs.seed}")
+    ch.subheader(f"{icon} {result.status.title()}  ·  seed {inputs.seed}")
     ce.download_button("Export CSV", _export_csv(result, names),
                        "results.csv", "text/csv")
 
@@ -461,7 +619,10 @@ def page_results() -> None:
               f"{total_cat/max(total_dep,1):.1%} of deployed")
     k2.metric("Portfolio Leverage", f"{result.leverage_ratio:.2f}×",
               "commercial per catalytic $")
-    k3.metric("Median IRR", f"{median_irr:.1%}" if np.isfinite(median_irr) else "N/A")
+    k3.metric(f"Median IRR  (hurdle {hurdle:.0%})",
+              f"{median_irr:.1%}" if np.isfinite(median_irr) else "N/A",
+              f"{'above' if np.isfinite(median_irr) and median_irr >= hurdle else 'below'} hurdle"
+              if np.isfinite(median_irr) else None)
     k4.metric("CVaR (95%)", f"{result.cvar_95:.1%}")
 
     st.divider()
@@ -480,6 +641,24 @@ def page_results() -> None:
     rows.sort(key=lambda r: float(r["Leverage"].replace("×", "")), reverse=True)
     st.dataframe(pd.DataFrame(rows).set_index("Vehicle"), use_container_width=True)
 
+    # --- Plain language commentary (Enhancement C) ---
+    with st.expander("Results Commentary — plain language explanation", expanded=False):
+        st.markdown(_portfolio_commentary(result, inputs, names))
+        st.divider()
+        for i, name in enumerate(names):
+            alpha   = result.catalytic_fractions.get(i, 0)
+            cat     = result.catalytic_allocations.get(i, 0)
+            com     = result.commercial_allocations.get(i, 0)
+            lev     = com / max(cat, 1)
+            cvar    = result.cvar_95  # vehicle-level CVaR not separately stored; use portfolio
+            # Compute median senior IRR if available via tranche results
+            # (VehicleResult tranche IRRs not in PortfolioResult — use portfolio-level as proxy)
+            irr_proxy = median_irr
+            st.markdown(_vehicle_commentary(name, alpha, lev, hurdle,
+                                            irr_proxy, cvar, inputs.n_sims))
+            if i < len(names) - 1:
+                st.divider()
+
     cl, cr = st.columns(2)
     with cl:
         st.plotly_chart(chart_irr_histogram(result.portfolio_irr_distribution),
@@ -487,6 +666,19 @@ def page_results() -> None:
     with cr:
         st.plotly_chart(chart_capital_stack(result, names), use_container_width=True)
     st.plotly_chart(chart_alpha(result, names), use_container_width=True)
+
+    # --- Base-case cashflow charts (Enhancement A) ---
+    cf_figs = chart_cashflows(inputs, names)
+    if cf_figs:
+        with st.expander("Underlying Cash Flows — base-case inputs to Monte Carlo", expanded=False):
+            st.caption(
+                "These charts show the **deterministic base-case cashflows** loaded from your "
+                "project files — the starting point before Monte Carlo price and yield shocks "
+                "are applied. Revenue bars are pre-shock (expected value); actual simulated "
+                "paths will fan out around these figures."
+            )
+            for vname, fig in cf_figs:
+                st.plotly_chart(fig, use_container_width=True)
 
 
 
@@ -660,11 +852,13 @@ def page_code_review() -> None:
         return
 
     with st.form("codex_form"):
+        _default_key = st.secrets.get("OPENAI_API_KEY", "") if hasattr(st, "secrets") else ""
+        _default_key = _default_key or os.environ.get("OPENAI_API_KEY", "")
         api_key = st.text_input(
             "OpenAI API Key",
             type="password",
-            value=os.environ.get("OPENAI_API_KEY", ""),
-            help="Or set the OPENAI_API_KEY environment variable before launching.",
+            value=_default_key,
+            help="Or set OPENAI_API_KEY in the environment / Streamlit Cloud secrets.",
         )
         model = st.selectbox("Model", ["gpt-4o", "gpt-4-turbo", "gpt-4"], index=0)
         files_to_review = st.multiselect(
