@@ -1,0 +1,15 @@
+# Core computation dependencies
+numpy>=1.26
+pandas>=2.1
+scipy>=1.11
+numpy-financial>=1.0
+cvxpy>=1.4
+pydantic>=2.5
+openpyxl>=3.1
+
+# Streamlit UI
+streamlit>=1.32
+plotly>=5.18
+
+# Optional: uncomment to enable the AI Code Review page
+# openai>=1.0

@@ -781,6 +781,100 @@ The script prints a structured report with pass/fail for 18 checks:
 
 ---
 
+## Developer Tools — AI Code Review Plugin
+
+Uses the OpenAI API (GPT-4o or GPT-4 Turbo) to review the calibration tool's
+core financial source files for mathematical errors, numerical stability issues,
+edge cases, and logic errors — a second model's perspective on the implementation.
+
+### Setup
+
+```bash
+pip install 'calibration-tool[codex]'
+export OPENAI_API_KEY=sk-...
+```
+
+### CLI usage
+
+```bash
+# Full review, text report (default):
+python run_codex_review.py
+
+# Specific files only:
+python run_codex_review.py --files calibration/vehicle/calibration.py calibration/utils/irr.py
+
+# Choose model:
+python run_codex_review.py --model gpt-4-turbo
+
+# Machine-readable output:
+python run_codex_review.py --output-format json
+python run_codex_review.py --output-format markdown > review.md
+```
+
+Exit codes: `0` = completed (findings are normal), `1` = missing key/package, `2` = all API calls failed.
+
+### Python API
+
+```python
+from calibration.plugins.openai_codex import CodexReviewer
+
+result = CodexReviewer(model="gpt-4o").review()
+
+for f in result.findings:
+    print(f"{f.severity:10s}  {f.file}  [{f.category}]  {f.description}")
+
+print(f"\n{len(result.findings)} findings across {len(result.files_reviewed)} files")
+print(f"Tokens used: {result.total_tokens_used:,}")
+```
+
+### Streamlit
+
+Visit the **🤖 Code Review** page (5th item in the sidebar navigation).
+Enter your OpenAI API key in the form (or pre-set `OPENAI_API_KEY` in the environment
+or in the Streamlit Cloud secrets dashboard — see [Deployment](#streamlit-cloud-deployment)).
+
+### What it reviews
+
+The plugin sends each of these files to the API in a separate call:
+
+| File | Focus areas |
+|------|-------------|
+| `calibration/project/simulation.py` | GBM drift/variance correction, shock application |
+| `calibration/vehicle/calibration.py` | Brent's method bracketing, monotonicity probe |
+| `calibration/vehicle/capital_stack.py` | Waterfall arithmetic, loss allocation ordering |
+| `calibration/vehicle/risk_mitigants.py` | Guarantee absorption logic, reserve depletion |
+| `calibration/portfolio/optimizer.py` | Rockafellar-Uryasev CVaR LP formulation |
+| `calibration/utils/irr.py` | IRR bracket logic, sentinel handling |
+| `calibration/utils/stats.py` | Cholesky decomposition, CVaR formula |
+
+---
+
+## Streamlit Cloud Deployment
+
+To deploy for non-technical users (URL-only, no Python install required):
+
+**1. Ensure `requirements.txt` is present** (already in the repo):
+```
+pip install -r requirements.txt   # verified list of all UI dependencies
+```
+
+**2. Push to GitHub** and connect the repo at [share.streamlit.io](https://share.streamlit.io):
+- Repository: `lwei-seedling/calibration-tool`
+- Branch: `main`
+- Main file path: `app.py`
+
+**3. (Optional) Enable the Code Review page** by adding your OpenAI API key as a secret
+in the Streamlit Cloud dashboard:
+```
+OPENAI_API_KEY = "sk-..."
+```
+Also add `openai>=1.0` to `requirements.txt` before deploying.
+
+**4. Share the deployed URL.** Users can upload CSVs, run calibration, explore results,
+and download reports — no Python installation needed.
+
+---
+
 ## Troubleshooting
 
 **`ValueError: Constraints infeasible`**
