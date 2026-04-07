@@ -202,12 +202,18 @@ class CodexReviewer:
             If the API key is missing or the ``openai`` package is not installed.
         """
         import os  # noqa: PLC0415
+        import sys as _sys  # noqa: PLC0415
 
         api_key = self.api_key or os.environ.get("OPENAI_API_KEY", "")
         if not api_key:
+            _set_cmd = (
+                "set OPENAI_API_KEY=sk-..."
+                if _sys.platform == "win32"
+                else "export OPENAI_API_KEY=sk-..."
+            )
             raise RuntimeError(
                 "OpenAI API key not set. "
-                "Pass api_key= or export OPENAI_API_KEY=sk-..."
+                f"Pass api_key= or run in your terminal: {_set_cmd}"
             )
 
         client = _get_openai_client(api_key)

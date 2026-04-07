@@ -268,9 +268,10 @@ def chart_capital_stack(result, names: list[str]) -> go.Figure:
                marker_color="#2E7D32", text=[f"${v:.1f}M" for v in com], textposition="inside"),
     ])
     fig.update_layout(barmode="stack", title="Capital Stack by Vehicle",
-                      xaxis_title="Capital ($M)", height=320,
-                      margin=dict(l=20, r=20, t=40, b=40),
-                      legend=dict(orientation="h", y=1.12))
+                      xaxis_title="Capital ($M)", height=360,
+                      margin=dict(l=20, r=20, t=40, b=70),
+                      legend=dict(orientation="h", yanchor="top", y=-0.20,
+                                  xanchor="center", x=0.5))
     return fig
 
 
@@ -442,6 +443,57 @@ def _portfolio_commentary(result, inputs, names: list[str]) -> str:
         f"in the worst 5% of simulated scenarios. {risk_note}"
     )
 
+
+def _sensitivity_commentary(base, mod, test_id: str, label: str) -> str:
+    """Plain-language interpretation of a sensitivity result."""
+    base_alpha = float(np.mean(list(base.catalytic_fractions.values())))
+    mod_alpha  = float(np.mean(list(mod.catalytic_fractions.values())))
+    d_alpha = mod_alpha - base_alpha
+    d_lev   = mod.leverage_ratio - base.leverage_ratio
+    d_cvar  = mod.cvar_95 - base.cvar_95
+
+    alpha_dir = "rises" if d_alpha > 0 else "falls"
+    lev_dir   = "falls" if d_lev   < 0 else "rises"
+    cvar_dir  = "rises" if d_cvar  > 0 else "falls"
+
+    alpha_note = (
+        f"The average catalytic fraction {alpha_dir} by **{abs(d_alpha):.1%}** "
+        f"({base_alpha:.1%} \u2192 {mod_alpha:.1%})."
+    )
+    lev_note = (
+        f"Portfolio leverage {lev_dir} to **{mod.leverage_ratio:.1f}\u00d7** "
+        f"(from {base.leverage_ratio:.1f}\u00d7)."
+    )
+    cvar_note = (
+        f"Senior tail-loss risk (CVaR\u2085) {cvar_dir} to **{mod.cvar_95:.1%}** "
+        f"(from {base.cvar_95:.1%})."
+    )
+
+    if test_id == "A" and d_alpha <= 0:
+        interp = (
+            f"**{label}** reduces the catalytic capital needed — the larger guarantee "
+            "absorbs more senior risk directly, so the first-loss tranche can be smaller."
+        )
+    elif test_id == "A" and d_alpha > 0:
+        interp = (
+            f"**{label}** raises the guarantee but alpha still increases, suggesting "
+            "the portfolio's risk profile is not fully offset by the additional coverage."
+        )
+    elif test_id == "B" and d_alpha > 0:
+        interp = (
+            f"**{label}** increases price uncertainty across projects, requiring more "
+            "catalytic protection to keep senior lenders at the hurdle IRR."
+        )
+    elif test_id in ("C", "D") and d_alpha > 0:
+        interp = (
+            f"**{label}** reduces project revenues, increasing default risk and requiring "
+            "a larger catalytic buffer to protect senior lenders."
+        )
+    else:
+        direction = "improves" if d_alpha <= 0 else "worsens"
+        interp = f"**{label}** {direction} the capital efficiency of the portfolio."
+
+    return f"{interp}\n\n{alpha_note} {lev_note} {cvar_note}"
 
 
 # ---------------------------------------------------------------------------
@@ -783,6 +835,8 @@ def page_sensitivity() -> None:
                     mod_result = PortfolioOptimizer(mod_inputs).run()
                 st.subheader(f"Comparison: Base vs {lbl}")
                 _sens_comparison(base_result, mod_result, names, lbl)
+                with st.expander("Commentary", expanded=True):
+                    st.markdown(_sensitivity_commentary(base_result, mod_result, tid, lbl))
             except Exception as exc:
                 st.error(f"Sensitivity run failed: {exc}")
 
@@ -794,26 +848,83 @@ def page_sensitivity() -> None:
 def page_how_it_works() -> None:
     st.header("How It Works")
     st.markdown("""
-## Blended Finance & Catalytic Capital
+## What is this tool for?
 
-**Catalytic capital** (grants, first-loss equity, DFI guarantees) absorbs downside risk so
-commercial investors can participate in high-impact projects they would otherwise find too risky.
+This tool helps foundations and development finance practitioners answer a practical
+question before committing capital: **how much concessional funding does a blended-finance
+deal actually need?**
 
-**α (Alpha)** = the minimum share of a vehicle's total capital that must be concessional.
-*Lower α = more efficient use of catalytic capital.*
+Rather than guessing, you describe your projects (revenues, costs, price risk), set the
+return your commercial investors require, and the tool calculates the *minimum* grant,
+first-loss, and guarantee support needed to make those investors whole — across all the
+market conditions your projects might face.
 
-## Pipeline
+Use it to:
+- **Size your catalytic budget** before structuring a vehicle or approaching co-investors
+- **Compare alternative structures** (more guarantee vs. more first-loss vs. larger reserve)
+- **Stress-test assumptions** — see how results change if prices fall or volatility rises
+- **Communicate to boards and donors** how efficiently each concessional dollar is being used
 
-```
-Project CSVs  →  Monte Carlo (GBM price paths)  →  Vehicle calibration  →  Portfolio LP
-```
+---
 
-1. **Project** — each CSV is one investment. Revenue = Yield × Price × GBM shock per year.
-2. **Vehicle** — pools projects; capital stack absorbs losses: Grant Reserve → First-Loss →
-   Mezzanine → Guarantee → Senior. Calibrator finds minimum α so senior lenders earn ≥ hurdle IRR.
-3. **Portfolio** — LP maximises commercial capital mobilised subject to CVaR tail-risk constraint.
+## Why catalytic capital matters
 
-## CSV Format (Format 2)
+Private investors — pension funds, banks, insurance companies — will only invest in
+emerging-market or nature-based projects if the risk-adjusted return meets their threshold.
+Many high-impact projects are too uncertain on their own to clear that bar.
+
+**Catalytic capital** (grants, first-loss equity, DFI guarantees) changes that equation by
+absorbing the first share of any losses. Think of it like an insurance deductible: a
+senior lender who knows the first 20% of losses will be covered by someone else faces a
+much less risky investment. The commercial investor's downside is protected; the foundation
+or DFI takes the concentrated risk in exchange for the impact.
+
+The key metric is **α (alpha)** — the share of a vehicle's total capital that must be
+concessional. If α = 25%, then for every $75 a commercial bank puts in, a foundation
+or DFI provides $25 of first-loss/guarantee support. A lower α means each catalytic
+dollar is doing more work.
+
+---
+
+## How the tool works — three steps
+
+**Step 1 — Describe your projects.**
+Upload a CSV for each investment: how many tonnes of carbon or commodity it will produce
+each year, what price you expect, how risky that price is, and what it costs to build
+and run. The tool runs thousands of simulated futures (high prices, low prices, average
+prices) to map out the range of outcomes each project might deliver.
+
+**Step 2 — Size the catalytic stack.**
+You set the return commercial investors require (the hurdle IRR) and the maximum chance
+of loss they'll accept. The tool then searches for the smallest catalytic fraction α
+that still meets both conditions across all those simulated scenarios. It tests
+combinations of first-loss equity, a cash reserve, a DFI guarantee on senior debt, and
+a mezzanine layer — all configurable in the Setup panel.
+
+**Step 3 — Allocate across your portfolio.**
+If you have several vehicles competing for a fixed catalytic budget, the tool uses a
+mathematical optimisation to find the allocation that mobilises the most commercial
+capital while keeping the portfolio's tail risk within bounds you set.
+
+---
+
+## How to read the results
+
+| Metric | What it means |
+|--------|---------------|
+| **Catalytic fraction (α)** | Share of total vehicle capital that must be concessional. α = 20% means $1 of catalytic unlocks $4 of commercial. |
+| **Leverage ratio** | Commercial capital mobilised per catalytic dollar. 4× means each $1 of grant/first-loss brings in $4 from banks. |
+| **Senior IRR** | The expected annual return for commercial investors, at the median of all simulated scenarios. Should meet or exceed the hurdle you set. |
+| **CVaR (95%)** | The expected senior-tranche loss rate in the worst 5% of scenarios. Near-zero means the catalytic structure is working — commercial investors are protected even in bad outcomes. |
+
+> **CVaR near zero is the goal, not a sign something is wrong.** It means the first-loss,
+> mezzanine, and guarantee layers have absorbed all tail losses before the senior tranche
+> is touched. The catalytic capital *is* taking risk — it's just doing so on behalf of
+> commercial investors, as intended.
+
+---
+
+## CSV format reference
 
 | Column | Required | Description |
 |--------|----------|-------------|
@@ -826,12 +937,10 @@ Project CSVs  →  Monte Carlo (GBM price paths)  →  Vehicle calibration  → 
 | `price_growth_rate` | ✓ | Annual log-price drift (e.g. 0.05 = 5 %/yr). |
 | `price_vol` | ✓ | Annual price volatility (e.g. 0.30 = 30 %). |
 
-**Revenue types:**
-- **Commodity** (cocoa, timber, water) — use spot/futures data for base price, drift, vol.
-- **Carbon** (REDD+, ARR, biochar) — assumption-based; no liquid futures market.
-Same columns, same GBM math. The label is for your reference only.
+**Revenue types:** Commodity (cocoa, timber) and Carbon (REDD+, ARR, biochar) use the
+same columns and the same price-simulation math. The label is for your reference only.
 
-## Typical Parameters
+## Typical project parameters
 
 | Project type | Yield units | Base price | Growth | Vol |
 |-------------|------------|-----------|--------|-----|
@@ -840,7 +949,7 @@ Same columns, same GBM math. The label is for your reference only.
 | Biochar | tons / yr | $130–200 | 4 % | 28 % |
 | Agroforestry (cocoa) | tons / yr | $1,800 | 3 % | 22 % |
 
-## Run Time
+## Run time
 ~30–90 s for 1,000 simulations with 3 vehicles (3–5 projects each).
 """)
     c1, c2 = st.columns(2)
