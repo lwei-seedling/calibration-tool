@@ -19,6 +19,12 @@ from calibration.utils.loaders import load_project_from_excel
 from calibration.vehicle.calibration import CalibratorConfig
 from calibration.vehicle.models import VehicleInputs
 
+try:
+    import openai as _openai_mod  # noqa: F401
+    _OPENAI_AVAILABLE = True
+except ImportError:
+    _OPENAI_AVAILABLE = False
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -343,9 +349,9 @@ def chart_cashflows(inputs, names: list[str]) -> list[go.Figure]:
             barmode="relative",
             xaxis_title="Period",
             yaxis_title="Cashflow (USD)",
-            height=360,
-            margin=dict(l=50, r=20, t=45, b=40),
-            legend=dict(orientation="h", y=1.14),
+            height=400,
+            margin=dict(l=50, r=20, t=45, b=80),
+            legend=dict(orientation="h", yanchor="top", y=-0.22, xanchor="center", x=0.5),
         )
         figs.append((vname, fig))
     return figs
@@ -413,7 +419,12 @@ def _portfolio_commentary(result, inputs, names: list[str]) -> str:
     hurdle    = inputs.calibrator_config.investor_hurdle_irr
     horizon   = _effective_horizon(inputs)
 
-    if cvar < 0.15:
+    if cvar < 0.01:
+        risk_note = (
+            "Near-zero senior CVaR confirms the capital structure is working as intended — "
+            "catalytic layers are absorbing tail losses so commercial investors are fully protected."
+        )
+    elif cvar < 0.15:
         risk_note = "Portfolio tail risk is within conservative bounds."
     elif cvar < 0.30:
         risk_note = "Portfolio tail risk is moderate — within typical blended-finance tolerances."
@@ -623,7 +634,18 @@ def page_results() -> None:
               f"{median_irr:.1%}" if np.isfinite(median_irr) else "N/A",
               f"{'above' if np.isfinite(median_irr) and median_irr >= hurdle else 'below'} hurdle"
               if np.isfinite(median_irr) else None)
-    k4.metric("CVaR (95%)", f"{result.cvar_95:.1%}")
+    k4.metric(
+        "CVaR (95%)",
+        f"{result.cvar_95:.1%}",
+        help=(
+            "Expected senior-tranche loss rate in the worst 5% of scenarios. "
+            "Near-zero values are the intended outcome of blended finance — "
+            "it means the first-loss, mezzanine, and guarantee layers have "
+            "successfully absorbed all tail losses before the senior tranche "
+            "is touched. The catalytic capital IS taking risk; the senior "
+            "tranche is being protected."
+        ),
+    )
 
     st.divider()
     st.subheader("Vehicle Breakdown")
@@ -642,7 +664,7 @@ def page_results() -> None:
     st.dataframe(pd.DataFrame(rows).set_index("Vehicle"), use_container_width=True)
 
     # --- Plain language commentary (Enhancement C) ---
-    with st.expander("Results Commentary — plain language explanation", expanded=False):
+    with st.expander("Commentary", expanded=False):
         st.markdown(_portfolio_commentary(result, inputs, names))
         st.divider()
         for i, name in enumerate(names):
@@ -847,12 +869,15 @@ def page_code_review() -> None:
     except ImportError:
         st.error(
             "The `openai` package is not installed. "
-            "Run: `pip install 'calibration-tool[codex]'`"
+            "Run: `pip install -e \".[codex]\"` (from repo root) or `pip install openai`."
         )
         return
 
     with st.form("codex_form"):
-        _default_key = st.secrets.get("OPENAI_API_KEY", "") if hasattr(st, "secrets") else ""
+        try:
+            _default_key = st.secrets.get("OPENAI_API_KEY", "")
+        except Exception:
+            _default_key = ""
         _default_key = _default_key or os.environ.get("OPENAI_API_KEY", "")
         api_key = st.text_input(
             "OpenAI API Key",
@@ -939,14 +964,17 @@ def main() -> None:
     with st.sidebar:
         st.title("🌿 Catalytic Capital")
         st.divider()
-        page = st.radio("Navigate", ["Setup", "Results", "Sensitivity", "How It Works", "Code Review"],
-                        format_func=lambda p: {
-                            "Setup": "📁  Setup",
-                            "Results": "📊  Results",
-                            "Sensitivity": "🔬  Sensitivity",
-                            "How It Works": "ℹ️  How It Works",
-                            "Code Review": "🤖  Code Review",
-                        }[p])
+        _pages = ["Setup", "Results", "Sensitivity", "How It Works"]
+        _page_labels = {
+            "Setup": "📁  Setup",
+            "Results": "📊  Results",
+            "Sensitivity": "🔬  Sensitivity",
+            "How It Works": "ℹ️  How It Works",
+        }
+        if _OPENAI_AVAILABLE:
+            _pages.append("Code Review")
+            _page_labels["Code Review"] = "🤖  Code Review"
+        page = st.radio("Navigate", _pages, format_func=lambda p: _page_labels[p])
         st.divider()
         st.subheader("Run Settings")
         n_sims = st.slider("Simulations", 100, 2000, 500, 100)

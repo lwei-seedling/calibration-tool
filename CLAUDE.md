@@ -50,12 +50,14 @@ calibration/
 ├── portfolio/         # LP optimizer across vehicles
 │   ├── models.py      # PortfolioInputs (Pydantic), PortfolioResult (dataclass)
 │   └── optimizer.py   # PortfolioOptimizer: full pipeline + cvxpy LP
-└── utils/
-    ├── irr.py         # batch_irr(), clean_irr() with edge-case sentinels
-    ├── stats.py       # var(), cvar(), cholesky_correlated_draws()
-    └── loaders.py     # load_project_from_excel(), load_price_series()
+├── utils/
+│   ├── irr.py         # batch_irr(), clean_irr() with edge-case sentinels
+│   ├── stats.py       # var(), cvar(), cholesky_correlated_draws()
+│   └── loaders.py     # load_project_from_excel(), load_price_series()
+└── plugins/           # Optional integrations (not required for core functionality)
+    └── openai_codex.py  # CodexReviewer: GPT-4 code review (requires openai extra)
 
-app.py                 # Streamlit web demo (4 pages: Setup, Results, Sensitivity, How It Works)
+app.py                 # Streamlit web demo (5 pages: Setup, Results, Sensitivity, How It Works, Code Review)
 examples/
 └── ui_sample/         # Format 2 CSV sample data for the Streamlit demo
     ├── vehicle_1_forestry/     (project_forestry_arr, _conservative, _risky)
@@ -161,6 +163,7 @@ pytest --cov=calibration --cov-report=term-missing
 pytest tests/test_project.py -v
 pytest tests/test_vehicle.py -v
 pytest tests/test_portfolio.py -v
+pytest tests/test_codex_plugin.py -v   # requires: pip install -e ".[codex]"
 ```
 
 All tests should pass. A warning about negative NPV on a stress-test project is expected.
@@ -178,6 +181,27 @@ python run_e2e.py --sims 5000 --seed 42
 ```
 
 See `README.md` for CSV/JSON format specifications.
+
+---
+
+## Plugins (Optional)
+
+### AI Code Review (`calibration/plugins/openai_codex.py`)
+
+Requires `pip install -e ".[codex]"` (or `pip install openai`) and `OPENAI_API_KEY`.
+
+```bash
+python run_codex_review.py          # text report (default)
+python run_codex_review.py --output-format markdown > review.md
+python run_codex_review.py --model gpt-4-turbo
+```
+
+See `README.md` "Developer Tools" section for full CLI/API documentation.
+
+In the Streamlit UI, the "🤖 Code Review" nav item is auto-hidden when `openai`
+is not installed, so it does not appear in public demos.
+
+---
 
 **Folder mode file rules** (loaded by `_load_folder_inputs` in `run_e2e.py`):
 - `project_*.csv` / `*.xlsx` → loaded as project data via `load_project_from_excel()`

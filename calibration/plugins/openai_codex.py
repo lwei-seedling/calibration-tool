@@ -6,7 +6,8 @@ numerical stability issues — providing a second model's perspective.
 
 Install the optional dependency::
 
-    pip install 'calibration-tool[codex]'
+    pip install -e ".[codex]"   # from repo root (editable install)
+    # or: pip install openai
 
 Then set your API key::
 
@@ -136,7 +137,7 @@ def _get_openai_client(api_key: str):  # type: ignore[return]
     except ImportError as exc:
         raise RuntimeError(
             "The 'openai' package is not installed. "
-            "Run: pip install 'calibration-tool[codex]'"
+            "Run: pip install -e \".[codex]\" (from repo root) or pip install openai"
         ) from exc
     return openai.OpenAI(api_key=api_key)
 

@@ -790,9 +790,18 @@ edge cases, and logic errors — a second model's perspective on the implementat
 ### Setup
 
 ```bash
-pip install 'calibration-tool[codex]'
+# From the repo root (editable install — recommended):
+pip install -e ".[codex]"
+
+# Or install openai directly:
+pip install openai
+
 export OPENAI_API_KEY=sk-...
 ```
+
+> **Note:** Code Review is a developer/internal tool. The nav item is hidden
+> automatically when `openai` is not installed, so it will not appear in
+> public demos deployed without the optional dependency.
 
 ### CLI usage
 
