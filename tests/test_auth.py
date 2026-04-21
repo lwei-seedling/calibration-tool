@@ -41,3 +41,34 @@ def test_malformed_hash_rejected():
     assert not _verify_password("pw", "pbkdf2_sha256$1000$zz$zz")
     assert not _verify_password("pw", "pbkdf2_sha256$1000$abcd")
     assert not _verify_password("pw", "pbkdf2_sha256$0$abcd$ef")
+    # iteration cap: reject absurd counts that would DoS verify
+    assert not _verify_password("pw", "pbkdf2_sha256$999999999$abcd$ef")
+
+
+def test_empty_password_rejected():
+    h = _hash_password_pbkdf2("")
+    assert not _verify_password("", h)
+    legacy_empty = hashlib.sha256(b"").hexdigest()
+    assert not _verify_password("", legacy_empty)
+
+
+def test_whitespace_in_stored_hash_ignored():
+    """Operators often paste hashes with trailing newlines into secrets.toml."""
+    h = _hash_password_pbkdf2("pw")
+    assert _verify_password("pw", h + "\n")
+    assert _verify_password("pw", "  " + h + "  ")
+    legacy = hashlib.sha256(b"pw").hexdigest()
+    assert _verify_password("pw", legacy + "\n")
+
+
+def test_legacy_hex_case_insensitive():
+    legacy = hashlib.sha256(b"pw").hexdigest()
+    assert _verify_password("pw", legacy.upper())
+    assert _verify_password("pw", legacy.lower())
+
+
+def test_non_ascii_password_roundtrip():
+    pwd = "pässwörd-🔒-日本語"
+    h = _hash_password_pbkdf2(pwd)
+    assert _verify_password(pwd, h)
+    assert not _verify_password("passw0rd", h)

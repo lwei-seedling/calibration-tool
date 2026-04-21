@@ -34,6 +34,7 @@ _LOCKOUT_SECONDS = 60
 _PBKDF2_PREFIX = "pbkdf2_sha256"
 _PBKDF2_ITERATIONS = 390_000
 _PBKDF2_SALT_BYTES = 16
+_PBKDF2_MAX_ITERATIONS = 10_000_000   # defense-in-depth cap against DoS hashes
 
 
 def _hash_password_pbkdf2(password: str, *, salt: bytes | None = None,
@@ -49,8 +50,14 @@ def _verify_password(password: str, expected_hash: str) -> bool:
     """Constant-time verify *password* against *expected_hash*.
 
     Accepts both the PBKDF2 format produced by ``_hash_password_pbkdf2`` and
-    legacy single-round SHA-256 hex digests.
+    legacy single-round SHA-256 hex digests. Empty passwords are rejected
+    unconditionally. ``expected_hash`` is stripped so copy-pasted TOML values
+    with trailing whitespace/newlines still verify. Legacy SHA-256 digests are
+    compared case-insensitively.
     """
+    if not password or not expected_hash:
+        return False
+    expected_hash = expected_hash.strip()
     if not expected_hash:
         return False
 
@@ -65,14 +72,14 @@ def _verify_password(password: str, expected_hash: str) -> bool:
             expected_dk = bytes.fromhex(dk_hex)
         except ValueError:
             return False
-        if iterations <= 0:
+        if not (0 < iterations <= _PBKDF2_MAX_ITERATIONS):
             return False
         candidate = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, iterations)
         return hmac.compare_digest(candidate, expected_dk)
 
     # Legacy SHA-256 hex digest (backward compatibility).
     candidate = hashlib.sha256(password.encode()).hexdigest()
-    return hmac.compare_digest(candidate, expected_hash)
+    return hmac.compare_digest(candidate, expected_hash.lower())
 
 
 def _reset_auth_state() -> None:
@@ -96,9 +103,12 @@ def check_auth() -> bool:
     """
     import streamlit as st
 
+    # Any failure to read a well-formed [auth] section -> open-access (dev) mode.
+    # Streamlit raises StreamlitSecretNotFoundError (KeyError subclass) when
+    # secrets.toml is absent; a malformed section can surface as AttributeError.
     try:
         auth_cfg = st.secrets["auth"]
-    except (KeyError, FileNotFoundError):
+    except (KeyError, FileNotFoundError, AttributeError):
         return True
 
     expected_hash = auth_cfg.get("password_hash", "")

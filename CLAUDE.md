@@ -58,6 +58,7 @@ calibration/
     └── openai_codex.py  # CodexReviewer: GPT-4 code review (requires openai extra)
 
 app.py                 # Streamlit web demo (5 pages: Setup, Results, Sensitivity, How It Works, Code Review)
+auth.py                # Password gate for app.py: PBKDF2-SHA256 hashes, session lockout
 examples/
 └── ui_sample/         # Format 2 CSV sample data for the Streamlit demo
     ├── vehicle_1_forestry/     (project_forestry_arr, _conservative, _risky)
@@ -147,6 +148,74 @@ Uploaded files must follow `vehiclename_projectname.csv`. The prefix before the 
 determines which vehicle the project belongs to:
 - `forestry_arr.csv` + `forestry_redd.csv` → **Forestry** vehicle (2 projects)
 - `agro_standard.csv` → **Agro** vehicle (1 project)
+
+---
+
+## Authentication (`auth.py`)
+
+`auth.py` is a **single-password gate** in front of `app.py`. It is called after
+`st.set_page_config()` and before any other UI code:
+
+```python
+from auth import check_auth, logout
+if not check_auth():
+    st.stop()
+```
+
+### Configuration modes (three states of `secrets.toml`)
+
+| `secrets.toml` state | Behaviour |
+|---|---|
+| No `[auth]` section | **Open access** (dev mode). `check_auth()` returns True immediately. |
+| `[auth]` present but `password_hash` empty | **Fail-closed.** Shows "Auth is enabled but no password is configured." |
+| `[auth]` with valid `password_hash` | **Password gate.** Renders login form. |
+
+### Hash formats
+
+| Format | Shape | When to use |
+|---|---|---|
+| **PBKDF2-SHA256** (recommended) | `pbkdf2_sha256$<iters>$<salt_hex>$<dk_hex>` | All new deployments. Default: 390,000 iterations, 16-byte salt. |
+| **Legacy SHA-256** | 64-char hex digest | Kept for backward compatibility only; rotate to PBKDF2. |
+
+Generate a PBKDF2 hash for `secrets.toml`:
+
+```bash
+python auth.py                 # interactive (getpass.getpass; no shell history leak)
+python auth.py YourPassword    # non-interactive (automation/CI)
+```
+
+### Session-state keys used
+
+| Key | Lifetime | Meaning |
+|---|---|---|
+| `_authenticated` | Until logout or session end | True if user passed the gate this session |
+| `_login_attempts` | Until lockout expires + reset | Count of consecutive failed password submissions |
+| `_login_locked_until` | Until 60 s after 5th failure | Unix timestamp when the lockout lifts |
+
+Both `logout()` and successful login call `_reset_auth_state()` which pops all three keys.
+
+### Known limitation — session-scoped lockout
+
+`_MAX_ATTEMPTS = 5` and `_LOCKOUT_SECONDS = 60` are enforced via Streamlit
+`session_state`. A fresh browser session (new incognito tab, cleared cookies)
+starts with an empty state and bypasses the lockout. This is a **UX rate
+limiter, not a hard security control**. For defense against scripted brute
+force, put an IP-aware proxy or Cloudflare Turnstile in front of the app.
+
+### Developer notes
+
+- `_verify_password` accepts both hash formats, ignores leading/trailing
+  whitespace on `expected_hash` (copy-paste-friendly) and is
+  case-insensitive for legacy hex digests.
+- Empty passwords are rejected unconditionally (even if the stored hash
+  matches `sha256(b"")` — that's a misconfiguration, not a valid login).
+- PBKDF2 iteration counts are capped at `_PBKDF2_MAX_ITERATIONS = 10_000_000`
+  as DoS defense-in-depth.
+- Tests live in `tests/test_auth.py` — pure-function tests only, no
+  Streamlit AppTest dependency.
+
+See `docs/AUTH_MANUAL_TEST_PLAN.md` for the ops checklist before shipping a
+new deployment.
 
 ---
 
