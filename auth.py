@@ -11,19 +11,75 @@ Usage in app.py:
         # ... rest of app ...
 
 Generate a password hash for secrets.toml:
-    python auth.py YourPassword
+    python auth.py                # interactive, no shell-history leak
+    python auth.py YourPassword   # non-interactive (automation)
+
+Supported hash formats in ``secrets.toml`` under ``[auth].password_hash``:
+
+* **PBKDF2-SHA256** (recommended) -- ``pbkdf2_sha256$<iters>$<salt_hex>$<dk_hex>``.
+  Salted, slow (390,000 iterations), resistant to offline brute-force.
+* **Legacy SHA-256** -- 64-char hex digest. Still verifies so existing
+  deployments keep working, but rotate to PBKDF2 at your next opportunity.
 """
 from __future__ import annotations
 
 import hashlib
 import hmac
+import os
+import time
 
 _MAX_ATTEMPTS = 5
+_LOCKOUT_SECONDS = 60
+
+_PBKDF2_PREFIX = "pbkdf2_sha256"
+_PBKDF2_ITERATIONS = 390_000
+_PBKDF2_SALT_BYTES = 16
 
 
-def _hash_password(password: str) -> str:
-    """SHA-256 hex digest of *password*."""
-    return hashlib.sha256(password.encode()).hexdigest()
+def _hash_password_pbkdf2(password: str, *, salt: bytes | None = None,
+                          iterations: int = _PBKDF2_ITERATIONS) -> str:
+    """Return ``pbkdf2_sha256$iters$salt_hex$dk_hex`` for *password*."""
+    if salt is None:
+        salt = os.urandom(_PBKDF2_SALT_BYTES)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, iterations)
+    return f"{_PBKDF2_PREFIX}${iterations}${salt.hex()}${dk.hex()}"
+
+
+def _verify_password(password: str, expected_hash: str) -> bool:
+    """Constant-time verify *password* against *expected_hash*.
+
+    Accepts both the PBKDF2 format produced by ``_hash_password_pbkdf2`` and
+    legacy single-round SHA-256 hex digests.
+    """
+    if not expected_hash:
+        return False
+
+    if expected_hash.startswith(_PBKDF2_PREFIX + "$"):
+        parts = expected_hash.split("$")
+        if len(parts) != 4:
+            return False
+        _, iter_s, salt_hex, dk_hex = parts
+        try:
+            iterations = int(iter_s)
+            salt = bytes.fromhex(salt_hex)
+            expected_dk = bytes.fromhex(dk_hex)
+        except ValueError:
+            return False
+        if iterations <= 0:
+            return False
+        candidate = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, iterations)
+        return hmac.compare_digest(candidate, expected_dk)
+
+    # Legacy SHA-256 hex digest (backward compatibility).
+    candidate = hashlib.sha256(password.encode()).hexdigest()
+    return hmac.compare_digest(candidate, expected_hash)
+
+
+def _reset_auth_state() -> None:
+    import streamlit as st
+
+    for key in ("_authenticated", "_login_attempts", "_login_locked_until"):
+        st.session_state.pop(key, None)
 
 
 def check_auth() -> bool:
@@ -40,40 +96,32 @@ def check_auth() -> bool:
     """
     import streamlit as st
 
-    # ------------------------------------------------------------------
-    # Dev / open-access mode: no [auth] section in secrets
-    # ------------------------------------------------------------------
     try:
         auth_cfg = st.secrets["auth"]
     except (KeyError, FileNotFoundError):
         return True
 
-    # ------------------------------------------------------------------
-    # Fail-closed: [auth] exists but hash is missing / empty
-    # ------------------------------------------------------------------
     expected_hash = auth_cfg.get("password_hash", "")
     if not expected_hash:
         st.error("Auth is enabled but no password is configured. Contact admin.")
         return False
 
-    # ------------------------------------------------------------------
-    # Already authenticated this session
-    # ------------------------------------------------------------------
     if st.session_state.get("_authenticated"):
         return True
 
-    # ------------------------------------------------------------------
-    # Rate limiting
-    # ------------------------------------------------------------------
-    attempts = st.session_state.get("_login_attempts", 0)
-    if attempts >= _MAX_ATTEMPTS:
-        st.title("\u26d4 Access Blocked")
-        st.error("Too many failed attempts. Please refresh the page to try again.")
+    now = time.time()
+    locked_until = st.session_state.get("_login_locked_until", 0.0)
+    if locked_until and now < locked_until:
+        remaining = int(locked_until - now) + 1
+        st.title("⛔ Temporarily Locked")
+        st.error(f"Too many failed attempts. Try again in {remaining}s.")
         return False
+    if locked_until and now >= locked_until:
+        st.session_state["_login_locked_until"] = 0.0
+        st.session_state["_login_attempts"] = 0
 
-    # ------------------------------------------------------------------
-    # Login form
-    # ------------------------------------------------------------------
+    attempts = st.session_state.get("_login_attempts", 0)
+
     st.title("\U0001f512 Login Required")
     st.caption("Internal demo access")
 
@@ -82,30 +130,32 @@ def check_auth() -> bool:
         submitted = st.form_submit_button("Log in", type="primary")
 
     if submitted:
-        if hmac.compare_digest(_hash_password(password), expected_hash):
+        if _verify_password(password, expected_hash):
+            _reset_auth_state()
             st.session_state["_authenticated"] = True
-            st.session_state["_login_attempts"] = 0
             st.rerun()
         else:
-            st.session_state["_login_attempts"] = attempts + 1
-            st.error("Incorrect password. Please try again.")
+            new_attempts = attempts + 1
+            st.session_state["_login_attempts"] = new_attempts
+            if new_attempts >= _MAX_ATTEMPTS:
+                st.session_state["_login_locked_until"] = time.time() + _LOCKOUT_SECONDS
+                st.error(
+                    f"Too many failed attempts. Locked for {_LOCKOUT_SECONDS}s."
+                )
+            else:
+                st.error("Incorrect password. Please try again.")
 
     return False
 
 
 def logout() -> None:
     """Clear authentication state."""
-    import streamlit as st
-
-    st.session_state.pop("_authenticated", None)
-    st.session_state.pop("_login_attempts", None)
+    _reset_auth_state()
 
 
-# ------------------------------------------------------------------
-# CLI helper: python auth.py <password>
-# ------------------------------------------------------------------
 if __name__ == "__main__":
+    import getpass
     import sys
 
-    pwd = sys.argv[1] if len(sys.argv) > 1 else input("Password: ")
-    print(_hash_password(pwd))
+    pwd = sys.argv[1] if len(sys.argv) > 1 else getpass.getpass("Password: ")
+    print(_hash_password_pbkdf2(pwd))
