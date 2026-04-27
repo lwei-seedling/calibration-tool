@@ -451,3 +451,49 @@ minimise weighted-average catalytic fraction.
 - **`load_price_series` frequency detection**: if dates can't be parsed (e.g. non-standard
   format), the function defaults to annual frequency (no scaling). Pass pre-annualised
   log-returns by supplying annual price observations to avoid this.
+
+---
+
+## Claude Code Integration
+
+The repo ships a small `.claude/` config so Claude Code helps without getting in the way.
+
+### `/calibrate-smoke` slash command
+
+Type `/calibrate-smoke` in any Claude Code session to run a fast deterministic sanity check:
+
+1. `python run_e2e.py --sims 200 --seed 42` (≈10 s)
+2. `python -m pytest -x -q` (full unit suite, fail-fast)
+3. Claude reports calibrated α, leverage, and any test failures
+
+Use it after edits to `calibration/**` before committing. Defined in
+`.claude/commands/calibrate-smoke.md` — edit the markdown to change steps.
+
+### Hooks (`.claude/settings.json`)
+
+| Hook | Triggers on | What it does |
+|---|---|---|
+| **Secrets guard** | `PreToolUse` on `Bash` matching `git (add\|commit) .*secrets.toml` | Blocks the command (exit 2) so the password hash file can never be staged or committed |
+| **Layer-local tests** | `PostToolUse` on `Edit\|Write` to `calibration/{vehicle,portfolio,project}/*.py` or `auth.py` | Auto-runs only the matching `tests/test_<layer>.py` — fast feedback (typically 1–3 s) without running the whole suite |
+
+The secrets hook is defence-in-depth on top of `.gitignore` — it catches mistakes
+where the file is staged via an absolute path or a non-standard add pattern.
+
+The test hooks fire only on the layer you just edited. They're silent on success;
+on failure pytest's output goes back to the model so it can fix the regression
+without you asking.
+
+**Disable temporarily:** delete or rename `.claude/settings.json`, or run Claude
+Code with `--no-hooks` (per-invocation). Type `/hooks` in a session to inspect.
+
+### When *not* to extend this
+
+Add more hooks/skills only after a manual workflow has bitten you twice. The
+priority order if you do extend:
+
+1. **Skill / slash command** — cheapest; just markdown describing a recipe
+2. **Subagent** — for parallel layer review or context isolation on `app.py` (1130 LOC)
+3. **Hook** — for deterministic guardrails the model can't forget (e.g. blocking commits of secrets, auto-formatting)
+4. **MCP server** — only when integrating a stateful external service (price-data feed, deployed-app log tail) that's awkward to wrap in shell
+
+Skip all of these for one-off tasks.

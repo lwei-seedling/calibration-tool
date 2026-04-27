@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.command // \"\"' | grep -qE 'git[[:space:]]+(add|commit).*secrets\\.toml' && { echo 'Blocked: refusing to git add/commit .streamlit/secrets.toml (contains the password hash; already gitignored).' >&2; exit 2; } || exit 0"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 90,
+            "command": "f=$(jq -r '.tool_input.file_path // .tool_response.filePath // \"\"'); case \"$f\" in *calibration/vehicle/*.py) python -m pytest tests/test_vehicle.py -x -q ;; *calibration/portfolio/*.py) python -m pytest tests/test_portfolio.py -x -q ;; *calibration/project/*.py) python -m pytest tests/test_project.py -x -q ;; */auth.py) python -m pytest tests/test_auth.py -x -q ;; esac"
+          }
+        ]
+      }
+    ]
+  }
+}

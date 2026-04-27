@@ -965,6 +965,58 @@ and download reports — no Python installation needed.
 
 ---
 
+## Working with Claude Code
+
+The repo includes a small `.claude/` config that activates automatically when you
+open the project in Claude Code (the CLI, desktop app, or web). It does two things:
+
+### 1. `/calibrate-smoke` — one-keystroke sanity check
+
+In a Claude Code session, type `/calibrate-smoke`. It runs:
+
+```bash
+python run_e2e.py --sims 200 --seed 42   # fast deterministic e2e (~10 s)
+python -m pytest -x -q                    # full unit tests, fail-fast
+```
+
+Claude then summarises calibrated α, leverage, and any failures. Use it as
+a pre-commit check after touching `calibration/**`.
+
+Edit `.claude/commands/calibrate-smoke.md` to change what it runs.
+
+### 2. Auto-hooks
+
+Two automated guardrails fire during a session:
+
+- **Secrets guard** — blocks any `git add` / `git commit` that references
+  `.streamlit/secrets.toml` (your password hash file). Defence-in-depth on
+  top of `.gitignore`.
+- **Layer-local test runner** — when Claude edits a file under
+  `calibration/vehicle/`, `calibration/portfolio/`, `calibration/project/`,
+  or `auth.py`, the matching `tests/test_<layer>.py` runs automatically.
+  Failures are surfaced back to Claude so it can self-correct.
+
+Both require `pip install -e ".[dev]"` (so `pytest` is on `PATH`).
+
+To disable temporarily: rename `.claude/settings.json`, or pass `--no-hooks`
+when launching Claude Code. Inspect with `/hooks` inside a session.
+
+### 3. Optional: subagents and MCP
+
+The project does **not** ship custom subagents or MCP servers. Add them only
+when a manual workflow has bitten you twice:
+
+| Primitive | Add when… |
+|---|---|
+| Skill / slash command | A multi-step recipe is repeated >3×/week |
+| Subagent (`Explore`, `Plan`, custom) | You need parallel investigation across layers, or `app.py` (1130 LOC) bloats your context |
+| Hook | A guardrail must be deterministic — model cannot be trusted to remember |
+| MCP server | Integrating a stateful external service (price-data feed, log tail) |
+
+See `CLAUDE.md` "Claude Code Integration" for the architectural rationale.
+
+---
+
 ## Troubleshooting
 
 **`ValueError: Constraints infeasible`**
