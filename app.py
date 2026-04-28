@@ -752,7 +752,7 @@ def page_results() -> None:
                 "paths will fan out around these figures."
             )
             for vname, fig in cf_figs:
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
 
 
 
