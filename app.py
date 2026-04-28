@@ -19,6 +19,8 @@ from calibration.utils.loaders import load_project_from_excel
 from calibration.vehicle.calibration import CalibratorConfig
 from calibration.vehicle.models import VehicleInputs
 
+from auth import check_auth, logout
+
 try:
     import openai as _openai_mod  # noqa: F401
     _OPENAI_AVAILABLE = True
@@ -1068,6 +1070,10 @@ def main() -> None:
                        page_icon="🌿", layout="wide",
                        initial_sidebar_state="expanded")
 
+    if not check_auth():
+        st.stop()
+        return
+
     with st.sidebar:
         st.title("🌿 Catalytic Capital")
         st.divider()
@@ -1092,6 +1098,10 @@ def main() -> None:
             st.divider()
             status = st.session_state["result"].status
             st.success(f"Last run: {status}") if status == "optimal" else st.warning(f"Last run: {status}")
+        st.divider()
+        if st.button("Logout"):
+            logout()
+            st.rerun()
 
     cfg = {"n_sims": n_sims, "hurdle_irr": hurdle, "max_loss_prob": max_loss, "seed": seed,
            "guarantee": 0.25, "reserve_pct": 0.05, "mezz_frac": 0.10,

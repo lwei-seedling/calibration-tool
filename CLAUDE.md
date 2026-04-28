@@ -58,6 +58,7 @@ calibration/
     └── openai_codex.py  # CodexReviewer: GPT-4 code review (requires openai extra)
 
 app.py                 # Streamlit web demo (5 pages: Setup, Results, Sensitivity, How It Works, Code Review)
+auth.py                # Password gate for app.py: PBKDF2-SHA256 hashes, session lockout
 examples/
 └── ui_sample/         # Format 2 CSV sample data for the Streamlit demo
     ├── vehicle_1_forestry/     (project_forestry_arr, _conservative, _risky)
@@ -147,6 +148,74 @@ Uploaded files must follow `vehiclename_projectname.csv`. The prefix before the 
 determines which vehicle the project belongs to:
 - `forestry_arr.csv` + `forestry_redd.csv` → **Forestry** vehicle (2 projects)
 - `agro_standard.csv` → **Agro** vehicle (1 project)
+
+---
+
+## Authentication (`auth.py`)
+
+`auth.py` is a **single-password gate** in front of `app.py`. It is called after
+`st.set_page_config()` and before any other UI code:
+
+```python
+from auth import check_auth, logout
+if not check_auth():
+    st.stop()
+```
+
+### Configuration modes (three states of `secrets.toml`)
+
+| `secrets.toml` state | Behaviour |
+|---|---|
+| No `[auth]` section | **Open access** (dev mode). `check_auth()` returns True immediately. |
+| `[auth]` present but `password_hash` empty | **Fail-closed.** Shows "Auth is enabled but no password is configured." |
+| `[auth]` with valid `password_hash` | **Password gate.** Renders login form. |
+
+### Hash formats
+
+| Format | Shape | When to use |
+|---|---|---|
+| **PBKDF2-SHA256** (recommended) | `pbkdf2_sha256$<iters>$<salt_hex>$<dk_hex>` | All new deployments. Default: 390,000 iterations, 16-byte salt. |
+| **Legacy SHA-256** | 64-char hex digest | Kept for backward compatibility only; rotate to PBKDF2. |
+
+Generate a PBKDF2 hash for `secrets.toml`:
+
+```bash
+python auth.py                 # interactive (getpass.getpass; no shell history leak)
+python auth.py YourPassword    # non-interactive (automation/CI)
+```
+
+### Session-state keys used
+
+| Key | Lifetime | Meaning |
+|---|---|---|
+| `_authenticated` | Until logout or session end | True if user passed the gate this session |
+| `_login_attempts` | Until lockout expires + reset | Count of consecutive failed password submissions |
+| `_login_locked_until` | Until 60 s after 5th failure | Unix timestamp when the lockout lifts |
+
+Both `logout()` and successful login call `_reset_auth_state()` which pops all three keys.
+
+### Known limitation — session-scoped lockout
+
+`_MAX_ATTEMPTS = 5` and `_LOCKOUT_SECONDS = 60` are enforced via Streamlit
+`session_state`. A fresh browser session (new incognito tab, cleared cookies)
+starts with an empty state and bypasses the lockout. This is a **UX rate
+limiter, not a hard security control**. For defense against scripted brute
+force, put an IP-aware proxy or Cloudflare Turnstile in front of the app.
+
+### Developer notes
+
+- `_verify_password` accepts both hash formats, ignores leading/trailing
+  whitespace on `expected_hash` (copy-paste-friendly) and is
+  case-insensitive for legacy hex digests.
+- Empty passwords are rejected unconditionally (even if the stored hash
+  matches `sha256(b"")` — that's a misconfiguration, not a valid login).
+- PBKDF2 iteration counts are capped at `_PBKDF2_MAX_ITERATIONS = 10_000_000`
+  as DoS defense-in-depth.
+- Tests live in `tests/test_auth.py` — pure-function tests only, no
+  Streamlit AppTest dependency.
+
+See `docs/AUTH_MANUAL_TEST_PLAN.md` for the ops checklist before shipping a
+new deployment.
 
 ---
 
@@ -382,3 +451,49 @@ minimise weighted-average catalytic fraction.
 - **`load_price_series` frequency detection**: if dates can't be parsed (e.g. non-standard
   format), the function defaults to annual frequency (no scaling). Pass pre-annualised
   log-returns by supplying annual price observations to avoid this.
+
+---
+
+## Claude Code Integration
+
+The repo ships a small `.claude/` config so Claude Code helps without getting in the way.
+
+### `/calibrate-smoke` slash command
+
+Type `/calibrate-smoke` in any Claude Code session to run a fast deterministic sanity check:
+
+1. `python run_e2e.py --sims 200 --seed 42` (≈10 s)
+2. `python -m pytest -x -q` (full unit suite, fail-fast)
+3. Claude reports calibrated α, leverage, and any test failures
+
+Use it after edits to `calibration/**` before committing. Defined in
+`.claude/commands/calibrate-smoke.md` — edit the markdown to change steps.
+
+### Hooks (`.claude/settings.json`)
+
+| Hook | Triggers on | What it does |
+|---|---|---|
+| **Secrets guard** | `PreToolUse` on `Bash` matching `git (add\|commit) .*secrets.toml` | Blocks the command (exit 2) so the password hash file can never be staged or committed |
+| **Layer-local tests** | `PostToolUse` on `Edit\|Write` to `calibration/{vehicle,portfolio,project}/*.py` or `auth.py` | Auto-runs only the matching `tests/test_<layer>.py` — fast feedback (typically 1–3 s) without running the whole suite |
+
+The secrets hook is defence-in-depth on top of `.gitignore` — it catches mistakes
+where the file is staged via an absolute path or a non-standard add pattern.
+
+The test hooks fire only on the layer you just edited. They're silent on success;
+on failure pytest's output goes back to the model so it can fix the regression
+without you asking.
+
+**Disable temporarily:** delete or rename `.claude/settings.json`, or run Claude
+Code with `--no-hooks` (per-invocation). Type `/hooks` in a session to inspect.
+
+### When *not* to extend this
+
+Add more hooks/skills only after a manual workflow has bitten you twice. The
+priority order if you do extend:
+
+1. **Skill / slash command** — cheapest; just markdown describing a recipe
+2. **Subagent** — for parallel layer review or context isolation on `app.py` (1130 LOC)
+3. **Hook** — for deterministic guardrails the model can't forget (e.g. blocking commits of secrets, auto-formatting)
+4. **MCP server** — only when integrating a stateful external service (price-data feed, deployed-app log tail) that's awkward to wrap in shell
+
+Skip all of these for one-off tasks.
