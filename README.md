@@ -900,7 +900,22 @@ self-hosted deployment should be `chmod 600 .streamlit/secrets.toml`.
 | Format | Purpose | Notes |
 |---|---|---|
 | `pbkdf2_sha256$<iters>$<salt_hex>$<dk_hex>` | **Recommended.** Salted PBKDF2-SHA256 (390,000 iters). | Produced by `python auth.py`. |
-| 64-char hex digest | **Legacy** unsalted SHA-256. | Still verifies; rotate to PBKDF2. |
+| 64-char hex digest | **Legacy** unsalted SHA-256. | Still verifies; logging in shows a one-time rotation warning. |
+
+### Audit logging
+
+Login activity is written to **stderr** (captured in Streamlit Community Cloud
+logs under *Manage app → Logs*, or your container's log stream):
+
+```
+[auth] 2026-06-14T18:56:56+00:00 login_success
+[auth] 2026-06-14T18:57:10+00:00 login_failed attempt=3
+[auth] 2026-06-14T18:57:40+00:00 lockout seconds=60
+[auth] 2026-06-14T18:58:01+00:00 legacy_hash_in_use rotate to pbkdf2_sha256
+```
+
+Passwords are never logged. Use these lines to spot brute-force attempts and to
+confirm whether a deployment is still on a legacy hash.
 
 ### Rate limiting
 

@@ -191,8 +191,27 @@ python auth.py YourPassword    # non-interactive (automation/CI)
 | `_authenticated` | Until logout or session end | True if user passed the gate this session |
 | `_login_attempts` | Until lockout expires + reset | Count of consecutive failed password submissions |
 | `_login_locked_until` | Until 60 s after 5th failure | Unix timestamp when the lockout lifts |
+| `_legacy_hash_warning` | Until shown once post-login | Set when login succeeds against a legacy SHA-256 hash; surfaced as an `st.warning` on the next run, then popped |
 
-Both `logout()` and successful login call `_reset_auth_state()` which pops all three keys.
+Both `logout()` and successful login call `_reset_auth_state()` which pops the
+three lockout/auth keys (it does **not** touch `_legacy_hash_warning`, which is
+consumed once on the post-login rerun).
+
+### Audit logging
+
+`check_auth()` writes single-line audit records to **stderr** (captured by
+Streamlit Cloud / container logs) via `_audit_log()`:
+
+| Event | When |
+|---|---|
+| `login_success` | Password verified |
+| `login_failed` | Wrong password (includes `attempt=N`) |
+| `lockout` | 5th consecutive failure (includes `seconds=60`) |
+| `legacy_hash_in_use` | Login succeeded against a legacy SHA-256 hash |
+
+Format: `[auth] <utc-iso8601> <event> [detail]`. **Passwords are never logged.**
+`_audit_event()` (the pure formatter) and `_is_legacy_hash()` are unit-tested in
+`tests/test_auth.py`.
 
 ### Known limitation — session-scoped lockout
 

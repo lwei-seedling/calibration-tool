@@ -20,13 +20,20 @@ Supported hash formats in ``secrets.toml`` under ``[auth].password_hash``:
   Salted, slow (390,000 iterations), resistant to offline brute-force.
 * **Legacy SHA-256** -- 64-char hex digest. Still verifies so existing
   deployments keep working, but rotate to PBKDF2 at your next opportunity.
+  A legacy hash triggers a one-time rotation warning after login.
+
+Audit logging: login successes, failures, lockouts, and legacy-hash usage
+are written to stderr as ``[auth] <utc-timestamp> <event> [detail]`` lines
+(captured by Streamlit Cloud / container logs). Passwords are never logged.
 """
 from __future__ import annotations
 
 import hashlib
 import hmac
 import os
+import sys
 import time
+from datetime import datetime, timezone
 
 _MAX_ATTEMPTS = 5
 _LOCKOUT_SECONDS = 60
@@ -82,6 +89,45 @@ def _verify_password(password: str, expected_hash: str) -> bool:
     return hmac.compare_digest(candidate, expected_hash.lower())
 
 
+def _is_legacy_hash(expected_hash: str) -> bool:
+    """True if *expected_hash* is a legacy bare SHA-256 hex digest (not PBKDF2).
+
+    Used to nudge operators to rotate to the salted PBKDF2 format. A legacy
+    hash is a 64-character hex string with no ``pbkdf2_sha256$`` prefix.
+    """
+    h = expected_hash.strip()
+    if not h or h.startswith(_PBKDF2_PREFIX + "$"):
+        return False
+    if len(h) != 64:
+        return False
+    try:
+        bytes.fromhex(h)
+    except ValueError:
+        return False
+    return True
+
+
+def _audit_event(event: str, *, detail: str = "", now: float | None = None) -> str:
+    """Build a single-line audit record with a UTC timestamp.
+
+    Never pass secrets (passwords, hashes) in *detail* -- audit records are
+    written to stderr and captured by deployment logs. *detail* should carry
+    only non-sensitive metadata such as attempt counts.
+    """
+    ts = datetime.fromtimestamp(
+        now if now is not None else time.time(), tz=timezone.utc
+    ).isoformat(timespec="seconds")
+    line = f"[auth] {ts} {event}"
+    if detail:
+        line += f" {detail}"
+    return line
+
+
+def _audit_log(event: str, *, detail: str = "") -> None:
+    """Emit an audit record to stderr (captured by Streamlit Cloud logs)."""
+    print(_audit_event(event, detail=detail), file=sys.stderr, flush=True)
+
+
 def _reset_auth_state() -> None:
     import streamlit as st
 
@@ -117,6 +163,11 @@ def check_auth() -> bool:
         return False
 
     if st.session_state.get("_authenticated"):
+        if st.session_state.pop("_legacy_hash_warning", False):
+            st.warning(
+                "This deployment uses a legacy SHA-256 password hash. "
+                "Rotate to PBKDF2 with `python auth.py` and update secrets.toml."
+            )
         return True
 
     now = time.time()
@@ -141,18 +192,26 @@ def check_auth() -> bool:
 
     if submitted:
         if _verify_password(password, expected_hash):
+            _audit_log("login_success")
             _reset_auth_state()
             st.session_state["_authenticated"] = True
+            if _is_legacy_hash(expected_hash):
+                _audit_log("legacy_hash_in_use", detail="rotate to pbkdf2_sha256")
+                # Surfaced on the post-login rerun (see top of check_auth);
+                # an st.warning here would be wiped by st.rerun().
+                st.session_state["_legacy_hash_warning"] = True
             st.rerun()
         else:
             new_attempts = attempts + 1
             st.session_state["_login_attempts"] = new_attempts
             if new_attempts >= _MAX_ATTEMPTS:
                 st.session_state["_login_locked_until"] = time.time() + _LOCKOUT_SECONDS
+                _audit_log("lockout", detail=f"seconds={_LOCKOUT_SECONDS}")
                 st.error(
                     f"Too many failed attempts. Locked for {_LOCKOUT_SECONDS}s."
                 )
             else:
+                _audit_log("login_failed", detail=f"attempt={new_attempts}")
                 st.error("Incorrect password. Please try again.")
 
     return False

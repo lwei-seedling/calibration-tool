@@ -164,7 +164,27 @@ prefix). Restart the server.
 | Step | Expected result |
 |---|---|
 | Submit the correct password | Logs in |
-| Submit a wrong password | Normal error path |
+| After login, a yellow warning appears | *"This deployment uses a legacy SHA-256 password hash. Rotate to PBKDF2…"* (shown once) |
+| Reload the tab | Warning does **not** reappear (it's one-time per login) |
+| Submit a wrong password (after logout) | Normal error path |
+
+Record result: ☐ Pass ☐ Fail
+
+---
+
+## 8b. Audit log lines on stderr
+
+**Goal:** confirm login activity is logged for ops without leaking secrets.
+
+Watch the terminal running `streamlit run app.py` (or Streamlit Cloud *Logs*).
+
+| Step | Expected `[auth] …` stderr line |
+|---|---|
+| Successful login | `[auth] <utc> login_success` |
+| Single wrong password | `[auth] <utc> login_failed attempt=1` |
+| 5th wrong password | `[auth] <utc> lockout seconds=60` |
+| Login against a legacy hash (section 8) | `[auth] <utc> legacy_hash_in_use rotate to pbkdf2_sha256` |
+| **Any** line above | The plaintext password is **never** present |
 
 Record result: ☐ Pass ☐ Fail
 
