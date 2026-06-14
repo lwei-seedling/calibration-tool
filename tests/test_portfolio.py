@@ -150,3 +150,20 @@ class TestPortfolioOptimizer:
         result = optimizer.run()
         assert result.status is not None
         assert len(result.status) > 0
+
+    def test_max_allocation_fraction_caps_single_vehicle(self):
+        """No allocation may exceed max_allocation_fraction * total_budget."""
+        vehicles = [make_vehicle(total_capital=2_000_000) for _ in range(3)]
+        cfg = CalibratorConfig(investor_hurdle_irr=0.04, max_loss_probability=0.15)
+        inputs = PortfolioInputs(
+            vehicles=vehicles,
+            calibrator_config=cfg,
+            total_budget=1_500_000,
+            max_allocation_fraction=0.40,
+            n_sims=200,
+            seed=42,
+        )
+        result = PortfolioOptimizer(inputs).run()
+        cap = 0.40 * 1_500_000
+        for v_idx, w in result.allocations.items():
+            assert w <= cap + 1.0, f"Vehicle {v_idx} allocation {w:,.0f} exceeds cap {cap:,.0f}"

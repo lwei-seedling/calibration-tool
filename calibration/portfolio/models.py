@@ -48,7 +48,7 @@ class PortfolioInputs(BaseModel):
     cvar_max: float = Field(
         0.30, ge=0.0, description="Maximum acceptable CVaR of portfolio loss rate at cvar_confidence."
     )
-    n_sims: int = Field(1000, ge=100, description="Number of Monte Carlo paths per vehicle.")
+    n_sims: int = Field(2000, ge=100, description="Number of Monte Carlo paths per vehicle. Default 2000 keeps the p95 CVaR tail populated with ~100 samples; drop to 200–500 for fast iteration.")
     seed: int | None = Field(None, description="Random seed for reproducibility.")
 
 

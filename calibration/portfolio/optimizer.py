@@ -232,6 +232,10 @@ class PortfolioOptimizer:
             w <= vehicle_capacities,
         ]
 
+        # Per-vehicle concentration cap (no single vehicle exceeds a fraction of the budget)
+        if cfg.max_allocation_fraction < 1.0:
+            constraints.append(w <= cfg.max_allocation_fraction * B)
+
         if cfg.catalytic_budget is not None:
             # New mode: catalytic budget constraint (foundation's catalytic capital limit)
             constraints.append(c @ w <= cfg.catalytic_budget)
