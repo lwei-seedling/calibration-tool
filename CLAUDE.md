@@ -131,6 +131,11 @@ year,yield,capex,opex,revenue_type,base_price,price_growth_rate,price_vol
 - Operating rows (`yield>0`) → `base_revenue = yield × base_price`, `base_costs = opex`
 - GBM price shocks applied to revenue only; capex/opex are deterministic pass-throughs
 - `revenue_type` ("carbon" or "commodity") is a UI label only — same math for both
+- `price_vol` is the volatility of project **revenue**, not of the spot carbon
+  price. A project that forward-sells a fraction `f` of its volume carries only
+  `(1 - f) x spot_vol`. The sample data assumes 30% offtake coverage for
+  nature-based projects and 70% for biochar — see `docs/SAMPLE_DATA_SOURCES.md`,
+  which is also where every price, yield and cost figure is sourced.
 
 ### MVP constraints
 

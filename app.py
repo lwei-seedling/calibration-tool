@@ -39,22 +39,23 @@ MAX_ROWS = 30
 
 TEMPLATE_CARBON = """\
 year,yield,capex,opex,revenue_type,base_price,price_growth_rate,price_vol
-2025,0,3000000,80000,carbon,15.0,0.05,0.30
-2026,0,1500000,80000,carbon,15.0,0.05,0.30
-2027,20000,0,120000,carbon,15.0,0.05,0.30
-2028,35000,0,120000,carbon,15.0,0.05,0.30
-2029,50000,0,120000,carbon,15.0,0.05,0.30
-2030,50000,0,120000,carbon,15.0,0.05,0.30
-2031,50000,0,120000,carbon,15.0,0.05,0.30
-2032,50000,0,120000,carbon,15.0,0.05,0.30
-2033,50000,0,120000,carbon,15.0,0.05,0.30
-2034,50000,0,120000,carbon,15.0,0.05,0.30
-2035,50000,0,120000,carbon,15.0,0.05,0.30
-2036,50000,0,120000,carbon,15.0,0.05,0.30
-2037,50000,0,120000,carbon,15.0,0.05,0.30
-2038,50000,0,120000,carbon,15.0,0.05,0.30
-2039,50000,0,120000,carbon,15.0,0.05,0.30
-2040,50000,0,120000,carbon,15.0,0.05,0.30
+2025,0,1080000,21000,carbon,26.0,0.03,0.245
+2026,0,720000,21000,carbon,26.0,0.03,0.245
+2027,2100,0,60000,carbon,26.0,0.03,0.245
+2028,3800,0,60000,carbon,26.0,0.03,0.245
+2029,5501,0,60000,carbon,26.0,0.03,0.245
+2030,7200,0,60000,carbon,26.0,0.03,0.245
+2031,8900,0,60000,carbon,26.0,0.03,0.245
+2032,10599,0,60000,carbon,26.0,0.03,0.245
+2033,12300,0,60000,carbon,26.0,0.03,0.245
+2034,14000,0,60000,carbon,26.0,0.03,0.245
+2035,14000,0,60000,carbon,26.0,0.03,0.245
+2036,14000,0,60000,carbon,26.0,0.03,0.245
+2037,14000,0,60000,carbon,26.0,0.03,0.245
+2038,14000,0,60000,carbon,26.0,0.03,0.245
+2039,14000,0,60000,carbon,26.0,0.03,0.245
+2040,14000,0,60000,carbon,26.0,0.03,0.245
+2041,14000,0,60000,carbon,26.0,0.03,0.245
 """
 
 TEMPLATE_COMMODITY = """\
@@ -968,10 +969,20 @@ same columns and the same price-simulation math. The label is for your reference
 
 | Project type | Yield units | Base price | Growth | Vol |
 |-------------|------------|-----------|--------|-----|
-| Forestry ARR | tCO2e / yr | $15 | 5 % | 30 % |
-| REDD+ | tCO2e / yr | $12 | 6 % | 35 % |
-| Biochar | tons / yr | $130–200 | 4 % | 28 % |
-| Agroforestry (cocoa) | tons / yr | $1,800 | 3 % | 22 % |
+| Forestry ARR | tCO2e / yr | $26 rated BBB+ (~$14 unrated) | 3 % | 25 % |
+| REDD+ | tCO2e / yr | $6 | 2 % | 41 % |
+| Biochar | tCO2e / yr | $130–200 | 2 % | 6 % |
+| Agroforestry | tCO2e / yr | $18–20 | 3 % | 28 % |
+| Cocoa (commodity) | tons / yr | market price | 3 % | 22 % |
+
+**Vol is revenue volatility, not spot carbon volatility.** Spot prices are far
+more volatile than these figures — nature-based credits run ~35 %, and REDD+
+lost 62 % of its value in a single year — but a project that forward-sells part
+of its volume only carries the volatility of the uncontracted balance. The
+figures above assume 30 % of volume is sold forward (70 % for biochar). If your
+project is fully merchant, use the spot numbers instead.
+
+Sources and reasoning for every figure: `docs/SAMPLE_DATA_SOURCES.md`.
 
 ## Run time
 ~30–90 s for 1,000 simulations with 3 vehicles (3–5 projects each).

@@ -127,59 +127,90 @@ def print_results(result: PortfolioResult, inputs: PortfolioInputs, vehicle_name
 # ---------------------------------------------------------------------------
 
 def _built_in_inputs(n_sims: int, seed: int | None) -> PortfolioInputs:
-    """Two-vehicle, three-project-each sample portfolio.
+    """Two-vehicle sample portfolio of African nature-based carbon projects.
 
-    Yields are scaled so each project's net lifetime cash is a plausible
-    multiple of its capex. The earlier figures implied revenue of ~$2.7M/yr on
-    $2M of capex — a 14x lifetime return, for which no concessional capital is
-    needed at all. They produced sensible-looking alphas only because the
-    cashflow waterfall was leaking senior principal; with that fixed they
-    calibrate to alpha = 0.
+    Every figure traces to a public source; see docs/SAMPLE_DATA_SOURCES.md for
+    the citations and the reasoning behind each one. In brief:
+
+      price      ARR credits rated BBB or better averaged $26/tCO2e in 2025
+                 offtakes (unrated ARR ~$14); agroforestry priced just below.
+      yield_     Planted tropical forest sequesters 4.5-40.7 tCO2e/ha/yr over
+                 its first 20 years; 12 tCO2e/ha/yr is the conservative average
+                 used under carbon standards. These use 12-14, net of a growth
+                 ramp (young trees fix less), so the figures below are the
+                 ramp-averaged annual yield rather than the plateau rate.
+      capex      African restoration runs from ~$185/ha (assisted natural
+                 regeneration) to $4,000-6,000/ha (commercial afforestation).
+                 These sit at $1,500-2,300/ha: managed planting, not plantation.
+      opex       $50-75/ha/yr management, monitoring and verification.
+      price_vol  Revenue volatility, NOT spot carbon volatility. Spot is ~0.35
+                 for nature-based credits; these assume 30% of volume is
+                 forward-sold, giving (1 - 0.30) x 0.35 = 0.245.
+
+    The projects are deliberately marginal. That is the point: a vehicle whose
+    senior lenders are comfortable without support does not need calibrating.
     """
+    # --- Vehicle 1: East Africa reforestation (ARR), ~7,000 ha --------------
     east_africa_projects = [
-        ProjectInputs(capex=2_000_000, opex_annual=80_000, price=45.0, yield_=7_800,
-                      lifetime_years=15, price_vol=0.12, yield_vol=0.08,
-                      inflation_rate=0.04, fx_vol=0.06, delay_prob=0.03),
-        ProjectInputs(capex=800_000,   opex_annual=35_000, price=12.0, yield_=10_400,
-                      lifetime_years=10, price_vol=0.18, yield_vol=0.15,
-                      inflation_rate=0.05, fx_vol=0.08, delay_prob=0.07),
-        ProjectInputs(capex=1_200_000, opex_annual=50_000, price=25.0, yield_=7_150,
-                      lifetime_years=12, price_vol=0.20, yield_vol=0.12,
-                      inflation_rate=0.04, fx_vol=0.10, delay_prob=0.05),
+        # 1,600 ha ARR at $1,800/ha; 14 tCO2e/ha/yr ramp-averaged to ~12.2
+        ProjectInputs(capex=2_880_000, opex_annual=96_000, price=26.0, yield_=19_500,
+                      lifetime_years=15, price_vol=0.245, yield_vol=0.18,
+                      inflation_rate=0.05, fx_vol=0.10,
+                      delay_years_probs=[0.60, 0.25, 0.15]),
+        # 900 ha, established species, partially contracted: lower volatility
+        ProjectInputs(capex=1_350_000, opex_annual=45_000, price=26.0, yield_=9_400,
+                      lifetime_years=15, price_vol=0.196, yield_vol=0.14,
+                      inflation_rate=0.05, fx_vol=0.10,
+                      delay_years_probs=[0.70, 0.20, 0.10]),
+        # 1,200 ha on degraded land: longer establishment, higher variance
+        ProjectInputs(capex=2_760_000, opex_annual=84_000, price=26.0, yield_=13_570,
+                      lifetime_years=14, price_vol=0.315, yield_vol=0.25,
+                      inflation_rate=0.05, fx_vol=0.12,
+                      delay_years_probs=[0.45, 0.30, 0.25]),
     ]
+    # --- Vehicle 2: West Africa agroforestry, ~7,300 ha smallholder --------
     west_africa_projects = [
-        ProjectInputs(capex=3_000_000, opex_annual=120_000, price=55.0, yield_=9_100,
-                      lifetime_years=20, price_vol=0.10, yield_vol=0.07,
-                      inflation_rate=0.03, fx_vol=0.07, delay_prob=0.02),
-        ProjectInputs(capex=600_000,   opex_annual=28_000,  price=8.0,  yield_=13_000,
-                      lifetime_years=8,  price_vol=0.25, yield_vol=0.20,
-                      inflation_rate=0.05, fx_vol=0.09, delay_prob=0.10),
-        ProjectInputs(capex=900_000,   opex_annual=40_000,  price=18.0, yield_=8_450,
-                      lifetime_years=12, price_vol=0.22, yield_vol=0.14,
-                      inflation_rate=0.04, fx_vol=0.11, delay_prob=0.06),
+        # 3,000 ha shaded cocoa at $600/ha; 7 tCO2e/ha/yr ramp-averaged
+        ProjectInputs(capex=1_800_000, opex_annual=120_000, price=20.0, yield_=18_270,
+                      lifetime_years=15, price_vol=0.280, yield_vol=0.22,
+                      inflation_rate=0.06, fx_vol=0.11,
+                      delay_years_probs=[0.55, 0.25, 0.20]),
+        # 2,500 ha parkland / live fencing at $500/ha: low cost, low yield
+        ProjectInputs(capex=1_250_000, opex_annual=70_000, price=18.0, yield_=10_875,
+                      lifetime_years=15, price_vol=0.280, yield_vol=0.20,
+                      inflation_rate=0.06, fx_vol=0.11,
+                      delay_years_probs=[0.65, 0.20, 0.15]),
+        # 1,800 ha rotational woodlots at $850/ha: higher yield, higher variance
+        ProjectInputs(capex=1_530_000, opex_annual=81_000, price=20.0, yield_=14_100,
+                      lifetime_years=15, price_vol=0.350, yield_vol=0.26,
+                      inflation_rate=0.06, fx_vol=0.13,
+                      delay_years_probs=[0.50, 0.28, 0.22]),
     ]
     vehicles = [
         VehicleInputs(
             projects=east_africa_projects,
-            correlation_matrix=[[1.00, 0.35, 0.20],
-                                 [0.35, 1.00, 0.40],
-                                 [0.20, 0.40, 1.00]],
-            total_capital=4_000_000,
-            guarantee_coverage=0.30,
-            grant_reserve=200_000,
+            # Rank correlations: shared carbon price and shared country risk,
+            # partly offset by different species, sites and buyers.
+            correlation_matrix=[[1.00, 0.45, 0.35],
+                                 [0.45, 1.00, 0.40],
+                                 [0.35, 0.40, 1.00]],
+            total_capital=8_400_000,      # capex $6.99M plus fees and reserves
+            guarantee_coverage=0.30,      # partial credit guarantee on senior
+            grant_reserve=250_000,
             mezzanine_fraction=0.10,
             senior_coupon=0.08,
             mezzanine_coupon=0.13,
         ),
         VehicleInputs(
             projects=west_africa_projects,
-            correlation_matrix=[[1.00, 0.25, 0.30],
-                                 [0.25, 1.00, 0.35],
-                                 [0.30, 0.35, 1.00]],
-            total_capital=6_000_000,
+            # Smallholder projects in one region move together more closely.
+            correlation_matrix=[[1.00, 0.50, 0.45],
+                                 [0.50, 1.00, 0.55],
+                                 [0.45, 0.55, 1.00]],
+            total_capital=5_500_000,      # capex $4.58M plus fees and reserves
             guarantee_coverage=0.25,
-            grant_reserve=300_000,
-            mezzanine_fraction=0.15,
+            grant_reserve=200_000,
+            mezzanine_fraction=0.10,
             senior_coupon=0.075,
             mezzanine_coupon=0.12,
         ),
@@ -190,7 +221,7 @@ def _built_in_inputs(n_sims: int, seed: int | None) -> PortfolioInputs:
             investor_hurdle_irr=0.07,
             max_loss_probability=0.08,
         ),
-        total_budget=10_000_000,
+        total_budget=13_900_000,   # sum of the two vehicles' capital
         max_allocation_fraction=0.70,
         cvar_confidence=0.95,
         cvar_max=0.35,
@@ -199,7 +230,7 @@ def _built_in_inputs(n_sims: int, seed: int | None) -> PortfolioInputs:
     )
 
 
-_BUILT_IN_NAMES = ["East Africa Nature Fund", "West Africa Clean Energy Fund"]
+_BUILT_IN_NAMES = ["East Africa Reforestation Fund", "West Africa Agroforestry Fund"]
 
 
 # ---------------------------------------------------------------------------
