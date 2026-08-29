@@ -56,6 +56,13 @@ def _section(title: str):
     _sep()
 
 
+def _fmt_leverage(value: float) -> str:
+    """Format a leverage ratio, keeping "no catalytic capital needed" legible."""
+    if value == float("inf"):
+        return "n/a"
+    return f"{value:.2f}x"
+
+
 def print_results(result: PortfolioResult, inputs: PortfolioInputs, vehicle_names: list[str]):
     _header("CATALYTIC CAPITAL CALIBRATION — RESULTS")
 
@@ -69,8 +76,8 @@ def print_results(result: PortfolioResult, inputs: PortfolioInputs, vehicle_name
     print(f"  Total deployed capital : ${total_deployed:>12,.0f}")
     print(f"  Total catalytic capital: ${total_catalytic:>12,.0f}  ({total_catalytic/ref:.1%} of deployed)")
     print(f"  Total commercial capital: ${total_commercial:>11,.0f}  ({total_commercial/ref:.1%} of deployed)")
-    print(f"  Portfolio leverage ratio: {result.leverage_ratio:>10.2f}x  (commercial per catalytic $)")
-    print(f"  Catalytic efficiency   : {result.leverage_ratio:>10.2f}x  (marginal commercial / catalytic)")
+    print(f"  Portfolio leverage ratio: {_fmt_leverage(result.leverage_ratio):>10}  (commercial per catalytic $)")
+    print(f"  Catalytic efficiency   : {_fmt_leverage(result.leverage_ratio):>10}  (marginal commercial / catalytic)")
     print(f"  Portfolio CVaR (95%)   : {result.cvar_95:>11.1%}  of deployed capital")
 
     irr_clean = result.portfolio_irr_distribution[np.isfinite(result.portfolio_irr_distribution)]
@@ -92,11 +99,15 @@ def print_results(result: PortfolioResult, inputs: PortfolioInputs, vehicle_name
             "Alpha (cat %)": f"{alpha:.1%}",
             "Catalytic $": f"{cat:,.0f}",
             "Commercial $": f"{com:,.0f}",
-            "Leverage (x)": f"{com / max(cat, 1.0):.1f}x",
-            "Marg. Efficiency": f"{eff:.1f}x",
+            "Leverage (x)": _fmt_leverage(float("inf") if cat <= 0 else com / cat),
+            "Marg. Efficiency": _fmt_leverage(eff),
         })
     # Sort by marginal efficiency descending
-    rows.sort(key=lambda r: float(r["Marg. Efficiency"].replace("x", "")), reverse=True)
+    rows.sort(
+        key=lambda r: float("inf") if r["Marg. Efficiency"] == "n/a"
+        else float(r["Marg. Efficiency"].rstrip("x")),
+        reverse=True,
+    )
     df = pd.DataFrame(rows).set_index("Vehicle")
     print(df.to_string())
 
@@ -116,26 +127,34 @@ def print_results(result: PortfolioResult, inputs: PortfolioInputs, vehicle_name
 # ---------------------------------------------------------------------------
 
 def _built_in_inputs(n_sims: int, seed: int | None) -> PortfolioInputs:
-    """Two-vehicle, three-project-each sample portfolio."""
+    """Two-vehicle, three-project-each sample portfolio.
+
+    Yields are scaled so each project's net lifetime cash is a plausible
+    multiple of its capex. The earlier figures implied revenue of ~$2.7M/yr on
+    $2M of capex — a 14x lifetime return, for which no concessional capital is
+    needed at all. They produced sensible-looking alphas only because the
+    cashflow waterfall was leaking senior principal; with that fixed they
+    calibrate to alpha = 0.
+    """
     east_africa_projects = [
-        ProjectInputs(capex=2_000_000, opex_annual=80_000, price=45.0, yield_=60_000,
+        ProjectInputs(capex=2_000_000, opex_annual=80_000, price=45.0, yield_=7_800,
                       lifetime_years=15, price_vol=0.12, yield_vol=0.08,
                       inflation_rate=0.04, fx_vol=0.06, delay_prob=0.03),
-        ProjectInputs(capex=800_000,   opex_annual=35_000, price=12.0, yield_=80_000,
+        ProjectInputs(capex=800_000,   opex_annual=35_000, price=12.0, yield_=10_400,
                       lifetime_years=10, price_vol=0.18, yield_vol=0.15,
                       inflation_rate=0.05, fx_vol=0.08, delay_prob=0.07),
-        ProjectInputs(capex=1_200_000, opex_annual=50_000, price=25.0, yield_=55_000,
+        ProjectInputs(capex=1_200_000, opex_annual=50_000, price=25.0, yield_=7_150,
                       lifetime_years=12, price_vol=0.20, yield_vol=0.12,
                       inflation_rate=0.04, fx_vol=0.10, delay_prob=0.05),
     ]
     west_africa_projects = [
-        ProjectInputs(capex=3_000_000, opex_annual=120_000, price=55.0, yield_=70_000,
+        ProjectInputs(capex=3_000_000, opex_annual=120_000, price=55.0, yield_=9_100,
                       lifetime_years=20, price_vol=0.10, yield_vol=0.07,
                       inflation_rate=0.03, fx_vol=0.07, delay_prob=0.02),
-        ProjectInputs(capex=600_000,   opex_annual=28_000,  price=8.0,  yield_=100_000,
+        ProjectInputs(capex=600_000,   opex_annual=28_000,  price=8.0,  yield_=13_000,
                       lifetime_years=8,  price_vol=0.25, yield_vol=0.20,
                       inflation_rate=0.05, fx_vol=0.09, delay_prob=0.10),
-        ProjectInputs(capex=900_000,   opex_annual=40_000,  price=18.0, yield_=65_000,
+        ProjectInputs(capex=900_000,   opex_annual=40_000,  price=18.0, yield_=8_450,
                       lifetime_years=12, price_vol=0.22, yield_vol=0.14,
                       inflation_rate=0.04, fx_vol=0.11, delay_prob=0.06),
     ]

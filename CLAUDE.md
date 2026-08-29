@@ -194,6 +194,14 @@ python auth.py YourPassword    # non-interactive (automation/CI)
 
 Both `logout()` and successful login call `_reset_auth_state()` which pops all three keys.
 
+### Fail-open by default
+
+With no `[auth]` section — or if secrets cannot be read at all — `check_auth()`
+returns `True` (open access) so local development works without configuration.
+Set `CALIBRATION_REQUIRE_AUTH=1` in the deployment environment to fail **closed**
+instead, so a missing or unreadable secrets file denies access rather than
+silently unlocking the app. Recommended for any public deployment.
+
 ### Known limitation — session-scoped lockout
 
 `_MAX_ATTEMPTS = 5` and `_LOCKOUT_SECONDS = 60` are enforced via Streamlit
@@ -300,9 +308,21 @@ investor tranches. There are two separate waterfalls:
   `L[s] = max(0, -NPV(CF[s], discount_rate))` and allocates it junior-first.
   `discount_rate` defaults to 0.0 (undiscounted sum). Set `discount_rate > 0` on
   `VehicleInputs` to use time-value-of-money discounting in loss calculations.
-- **Cashflow waterfall** — runs per-period during the vehicle's life. Distributes
-  available cash to each tranche according to coupon entitlement before any residual
-  goes to the first-loss (equity) layer.
+- **Cashflow waterfall** — runs per-period during the vehicle's life. Pays each
+  tranche its coupon, then **retains cash against the maturity bullet** on a
+  sinking-fund schedule (`(senior + mezz outstanding) * t / T`) before any residual
+  goes to the first-loss (equity) layer. The retained balance is fully liquid: it
+  is added back to available cash each period, so it also absorbs coupon shortfalls
+  like a debt service reserve account.
+
+  Without retention the structure leaks every spare dollar to equity and then
+  cannot meet the bullet — a vehicle returning 3× its capital still defaulted on
+  senior principal. See `docs/BUILD_REVIEW.md` (F1).
+
+  **Risk mitigants act here too.** The grant reserve seeds the retained balance,
+  and the guarantee is drawn to make senior whole when cash falls short, capped at
+  `coverage × senior notional` over the life of the vehicle. They remain layers in
+  the loss waterfall as well — two views of the same protection, not two pots.
 
 ### 3. Correlation at vehicle level
 Post-simulation correlation is applied at project aggregation (vehicle level).
@@ -310,7 +330,14 @@ Rank-based reordering (Iman-Conover style) reorders each project's simulation
 paths to match a target Cholesky-decomposed correlation structure. The
 `corr_matrix` in `VehicleInputs` is a J×J project-level correlation matrix.
 
-**Note:** This is an approximation — it correlates total lifetime cashflow
+`corr_matrix` is interpreted as a **rank (Spearman) correlation** — that is the
+statistic rank reordering actually controls. The target is passed through the
+inverse of the normal-copula rank transform (`2*sin(pi*rho/6)`) before drawing, so
+the achieved rank correlation matches the number supplied. Linear (Pearson)
+correlation will read lower for skewed marginals; that is a Fréchet bound, not an
+implementation gap.
+
+**Note:** This is still an approximation — it correlates total lifetime cashflow
 rankings, not the underlying stochastic drivers. A future extension would
 correlate underlying risk factors (price shocks, yield shocks) at draw time.
 `ProjectSimulator` does not hardcode independence assumptions and can accept
@@ -329,6 +356,17 @@ and their maximum loss-probability tolerance. The search is 1-D (α ∈ [0, 1]).
    (50 coarse + 50 fine points around the best coarse point)
 4. **Common-random-numbers**: the Monte Carlo paths are drawn once and reused for every
    α evaluation, so noise does not mask the monotone signal.
+
+**Structural guards** (see `docs/BUILD_REVIEW.md`, F5):
+- `investor_hurdle_irr` **must be strictly below** the vehicle's `senior_coupon`.
+  The waterfall never pays senior more than coupon plus principal, so a hurdle at
+  or above the coupon is unreachable at any alpha — the search could only "satisfy"
+  it by shrinking senior to nothing. This now raises `ValueError` at calibration
+  time rather than reporting a degenerate alpha.
+- The search is capped at `1 - mezzanine_fraction - min_senior_fraction`
+  (default 5%), so alpha can never land where the senior tranche has vanished.
+- The returned alpha is checked for feasibility and nudged up if brentq converged
+  marginally on the infeasible side of the boundary.
 
 **Calibration objective:** `_h(alpha) = min(g1, g2)` where:
 - `g1` = (senior median IRR) − (hurdle IRR): positive means IRR constraint is met
@@ -360,9 +398,19 @@ base_cashflows=[-500_000, -300_000, 0, 180_000, …]  # t=0 and t=1 are construc
 The simulator uses the array as CF[0..T]; no scalar scaling is applied to negative periods.
 
 ### 5a. IRR sentinels
-- `-1.0` → total loss (no positive inflows, capex outflow present)
-- `NaN` → undefined (no investment outflow at t=0) — treated as `-1.0` after cleaning
-- `10.0` → capped (outlier path with >1000% return)
+- `-1.0` → total loss (no positive inflows, capex outflow present), or a true IRR
+  below the `-0.999` floor
+- `10.0` → a true IRR above the 1000% cap. Reached when NPV is positive at *both*
+  bracket endpoints: the root is outside the interval, not undefined. Previously
+  this returned `NaN` and was then booked as `-1.0`, sign-flipping a spectacular
+  return into a total loss (F3).
+- `NaN` → no sign change, or brentq failed to converge — treated as `-1.0` after
+  cleaning
+
+`batch_irr` solves all paths at once by vectorised bisection rather than one
+scalar `brentq` per path. It agrees with the scalar solver to ~3e-9 and is ~25x
+faster; since the calibrator re-evaluates it for every trial alpha, this dominates
+pipeline runtime (full test suite: 66s → 10s).
 
 ### 6. Portfolio LP (Rockafellar-Uryasev CVaR)
 
@@ -410,14 +458,19 @@ minimise weighted-average catalytic fraction.
 
 ## Common Pitfalls
 
-- **Bullet maturity model**: principal returns entirely at `t=T`. For short-life projects
-  with steady cashflows, ensure terminal cashflow is large enough to repay senior principal.
-  If your project has back-loaded revenue, this works naturally. Otherwise, increase
-  `total_capital / T * multiplier` to ensure terminal cash is sufficient.
+- **Bullet maturity model**: principal returns entirely at `t=T`, funded by the
+  sinking fund described above. Terminal cashflow no longer has to cover the whole
+  bullet on its own — cash is retained from period 1 onward. (Before the retention
+  fix this was a live trap that inflated alpha on every vehicle.)
 
 - **Infeasible calibration**: if `CatalyticCalibrator` raises `ValueError: Constraints infeasible`,
   either (a) relax `investor_hurdle_irr` / `max_loss_probability` in `CalibratorConfig`,
   or (b) add more protective mitigants (higher `guarantee_coverage` or `grant_reserve`).
+  Check first whether `investor_hurdle_irr >= senior_coupon` — that is unsatisfiable
+  by construction and the error message says so. `PortfolioOptimizer` no longer falls
+  back to `alpha=0.99` when a vehicle cannot be calibrated; it raises, naming the
+  vehicle, because "needs 99% catalytic capital" and "cannot be structured at all"
+  are different answers.
 
 - **CVaR constraint too tight**: if the portfolio LP returns status `infeasible`, increase
   `cvar_max` in `PortfolioInputs` or reduce `cvar_confidence`. Also check that
@@ -425,6 +478,9 @@ minimise weighted-average catalytic fraction.
 
 - **All-zero LP allocation**: if the optimizer returns zero weights for all vehicles, set
   `min_deployment > 0` in `PortfolioInputs` to enforce a minimum total deployment.
+  Note that a *failed* LP now also returns zeros with a `RuntimeWarning` and a
+  non-optimal `status`, rather than fabricating an equal split — always check
+  `PortfolioResult.status`.
 
 - **Correlation matrix not PD**: `cholesky_correlated_draws()` automatically applies Higham's
   nearest-PD projection. Check the warning log if correlations were modified.
@@ -436,6 +492,11 @@ minimise weighted-average catalytic fraction.
 - **Excel ingestion with revenue/cost columns**: if your Excel sheet has `revenue` and `cost`
   columns, `load_project_from_excel()` populates `base_revenue` and `base_costs` directly
   (not `base_cashflows`). Ensure `price_vol` is set in the sheet or passed as a kwarg.
+
+- **CVaR of a mostly-zero loss distribution**: `cvar()` averages the worst
+  `ceil((1-confidence) * n)` losses by rank. It does *not* select the tail with
+  `losses >= VaR`, which collapses when VaR is exactly zero — the normal case for a
+  senior tranche, where it understated tail risk by ~20x (F4).
 
 - **IRR overflow warnings** (`RuntimeWarning: overflow encountered in power`): expected and
   harmless. They occur when Newton's method evaluates a very high trial IRR (e.g. >500%)

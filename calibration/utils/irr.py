@@ -7,13 +7,22 @@ for large t and extreme trial rates. brentq is a bracketed root-finder: it
 *guarantees* every evaluation of NPV(r) occurs within the interval
 [-0.999, 10.0], so no overflow is possible.
 
-Why NaN is expected in some Monte Carlo paths
-----------------------------------------------
-In a blended-finance Monte Carlo, some simulation paths produce cashflow
-sequences with no sign change (e.g. construction-phase-only losses with zero
-revenue in tail scenarios). IRR is mathematically undefined for these paths.
-Returning NaN is correct; clean_irr() converts NaN to the -1.0 (total-loss)
-sentinel for downstream portfolio statistics.
+Sentinels, and why a bracket miss is not a failure
+--------------------------------------------------
+Some simulation paths produce cashflow sequences with no sign change (e.g.
+construction-phase-only losses with zero revenue in tail scenarios). IRR is
+mathematically undefined for these, and they return the -1.0 total-loss
+sentinel directly.
+
+A separate case is a path whose true IRR lies *outside* [-0.999, 10.0] — an
+outlier returning more than 1000%. NPV then has the same sign at both bracket
+endpoints. That is a root outside the interval, not an undefined one, so it
+reports the corresponding bound (10.0 or -0.999) rather than NaN. Reporting
+NaN here would send a spectacular return through clean_irr's NaN branch and
+book it as a total loss.
+
+NaN is therefore reserved for genuine solver failure, and clean_irr() still
+converts it conservatively to -1.0.
 """
 from __future__ import annotations
 
@@ -37,8 +46,10 @@ class IrrDiagnostics:
         n_no_sign_change: Paths with no sign change in cashflows — IRR is
                           mathematically undefined; counted before solver call.
                           Includes total-loss paths (returned as -1.0 sentinel).
-        n_failures:      Paths where NPV had no root in [-0.999, 10.0] or
-                          brentq failed to converge — returned as NaN.
+        n_failures:      Paths where brentq failed to converge despite a sign
+                          change — returned as NaN. A true IRR outside the
+                          bracket is *not* counted here: it reports the
+                          corresponding bound instead.
     """
     n_computed: int
     n_no_sign_change: int
@@ -62,8 +73,10 @@ def _irr_single(cashflows: np.ndarray) -> float:
 
     Returns:
         IRR as a decimal (e.g. 0.12 for 12%).
-        -1.0  — total-loss sentinel (negative outflow, zero inflows).
-        NaN   — IRR undefined: no sign change, or no root in [-0.999, 10.0].
+        -1.0  — total-loss sentinel (negative outflow, zero inflows), or the
+                true IRR is below the -0.999 floor.
+        10.0  — the true IRR exceeds the 1000% cap.
+        NaN   — no sign change, or brentq failed to converge.
     """
     has_negative = np.any(cashflows < 0.0)
     has_positive = np.any(cashflows > 0.0)
@@ -87,8 +100,16 @@ def _irr_single(cashflows: np.ndarray) -> float:
         return float("nan")
 
     if npv_lo * npv_hi > 0.0:
-        # NPV is same sign at both ends — no root inside the interval.
-        return float("nan")
+        # NPV has the same sign at both ends, so the root lies outside the
+        # bracket rather than being undefined. NPV is decreasing in r for a
+        # conventional cashflow, so the sign tells us which side it fell off:
+        #   both positive → the return exceeds _R_HI  → report the cap
+        #   both negative → the return is below _R_LO → report the floor
+        # Returning NaN here would send the path through clean_irr's NaN branch
+        # and book a very high return as a total loss.
+        if npv_hi > 0.0:
+            return _R_HI
+        return _R_LO
 
     try:
         r = brentq(_npv_stable, _R_LO, _R_HI, args=(cashflows, t),
@@ -99,11 +120,26 @@ def _irr_single(cashflows: np.ndarray) -> float:
     return float(r)
 
 
+def _npv_vec(rates: np.ndarray, cashflows: np.ndarray, t: np.ndarray) -> np.ndarray:
+    """NPV of each row of `cashflows` at its own rate in `rates`.
+
+    Uses exp(t*log1p(r)) for the same overflow safety as the scalar path.
+    """
+    discount = np.exp(t[np.newaxis, :] * np.log1p(rates)[:, np.newaxis])
+    return np.sum(cashflows / discount, axis=1)
+
+
 def batch_irr(
     cashflows: np.ndarray,
     return_diagnostics: bool = False,
 ) -> np.ndarray | tuple[np.ndarray, IrrDiagnostics]:
     """Compute IRR for each simulation path.
+
+    Vectorised bisection over all paths at once. The calibrator re-evaluates the
+    waterfall — and therefore this function — for every trial alpha, so a Python
+    loop calling a scalar root-finder per path dominates the runtime of the whole
+    pipeline. Bisection needs more iterations than Brent's method but each one is
+    a single array operation over every path, which is far cheaper overall.
 
     Args:
         cashflows: Array of shape (n_sims, T) where axis-0 is simulation paths
@@ -114,33 +150,71 @@ def batch_irr(
 
     Returns:
         irr_vector of shape (n_sims,). Sentinels:
-          -1.0  → total loss (no inflows)
-          NaN   → IRR undefined or no root in [-0.999, 10.0]
-          10.0  → capped at 1000% (applied by clean_irr; brentq upper bound)
+          -1.0  → total loss (no inflows), or IRR below the -0.999 floor
+          10.0  → IRR above the 1000% cap
+          NaN   → no sign change, or the bracket endpoints were not finite
 
         If return_diagnostics=True, returns (irr_vector, IrrDiagnostics).
     """
     cashflows = np.asarray(cashflows, dtype=float)
-    n_sims = cashflows.shape[0]
+    n_sims, n_periods = cashflows.shape
+    t = np.arange(n_periods, dtype=float)
+
     result = np.empty(n_sims, dtype=float)
 
-    n_no_sign_change = 0
+    has_negative = np.any(cashflows < 0.0, axis=1)
+    has_positive = np.any(cashflows > 0.0, axis=1)
+
+    # No investment outflow → IRR undefined. No inflows → total loss.
+    result[~has_negative] = np.nan
+    result[has_negative & ~has_positive] = -1.0
+
+    solvable = has_negative & has_positive
+    n_no_sign_change = int(np.sum(~solvable))
     n_failures = 0
 
-    for s in range(n_sims):
-        cf = cashflows[s]
-        has_negative = np.any(cf < 0.0)
-        has_positive = np.any(cf > 0.0)
+    if np.any(solvable):
+        cf = cashflows[solvable]
+        lo = np.full(cf.shape[0], _R_LO)
+        hi = np.full(cf.shape[0], _R_HI)
 
-        if not has_negative or not has_positive:
-            n_no_sign_change += 1
+        npv_lo = _npv_vec(lo, cf, t)
+        npv_hi = _npv_vec(hi, cf, t)
 
-        val = _irr_single(cf)
-        result[s] = val
+        vals = np.empty(cf.shape[0], dtype=float)
 
-        if np.isnan(val) and has_negative and has_positive:
-            # Has sign change but solver found no root — bracket miss
-            n_failures += 1
+        # Endpoints that could not be evaluated are genuine solver failures.
+        bad = ~np.isfinite(npv_lo) | ~np.isfinite(npv_hi)
+        vals[bad] = np.nan
+        n_failures = int(np.sum(bad))
+
+        # Root outside the bracket: report the bound it fell past, not NaN.
+        outside = (npv_lo * npv_hi > 0.0) & ~bad
+        vals[outside & (npv_hi > 0.0)] = _R_HI
+        vals[outside & (npv_hi <= 0.0)] = _R_LO
+
+        bracketed = ~bad & ~outside
+        if np.any(bracketed):
+            b_cf = cf[bracketed]
+            b_lo = lo[bracketed]
+            b_hi = hi[bracketed]
+            f_lo = npv_lo[bracketed]
+
+            # Bisection to the same 1e-8 tolerance as the scalar solver.
+            # The bracket is 11.0 wide, so 2^-n * 11 < 1e-8 needs n >= 31.
+            for _ in range(60):
+                mid = 0.5 * (b_lo + b_hi)
+                f_mid = _npv_vec(mid, b_cf, t)
+                same_side = (f_mid * f_lo) > 0.0
+                b_lo = np.where(same_side, mid, b_lo)
+                f_lo = np.where(same_side, f_mid, f_lo)
+                b_hi = np.where(same_side, b_hi, mid)
+                if np.all(b_hi - b_lo < 1e-9):
+                    break
+
+            vals[bracketed] = 0.5 * (b_lo + b_hi)
+
+        result[solvable] = vals
 
     if return_diagnostics:
         diag = IrrDiagnostics(
@@ -182,10 +256,12 @@ def npv_loss(cashflows: np.ndarray, discount_rate: float = 0.0) -> np.ndarray:
 
 
 def clean_irr(irr_vector: np.ndarray) -> np.ndarray:
-    """Replace NaN with -1.0 and cap +inf at 10.0 for safe statistics.
+    """Replace NaN with -1.0 and clip infinities to the sentinel bounds.
 
-    NaN is treated conservatively as total loss. +inf is capped at 10.0
-    (1000% return) to avoid distorting aggregate statistics.
+    NaN (genuine solver failure) is treated conservatively as total loss.
+    Infinities are clipped to +/-10.0 and -1.0. Note that IRRs beyond the
+    bracket are already reported as 10.0 / -0.999 by batch_irr, so they arrive
+    here as ordinary finite values.
     """
     out = irr_vector.copy()
     out[np.isnan(out)] = -1.0

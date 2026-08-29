@@ -48,16 +48,27 @@ class PortfolioOptimizer:
     # Step 1: Simulate vehicle cashflows
     # ------------------------------------------------------------------
 
-    def _simulate_vehicle(
+    def _correlated_project_cashflows(
         self,
         vehicle_idx: int,
         seed_offset: int,
-    ) -> np.ndarray:
-        """Run correlated Monte Carlo for all projects in a vehicle.
+    ) -> list[np.ndarray]:
+        """Simulate each project, then reorder paths to induce the target correlation.
+
+        Each project is simulated independently and then its simulation paths are
+        permuted (Iman-Conover) so that the *rank* of a project's total lifetime
+        cashflow tracks the rank of a correlated normal draw. Because the draws
+        carry the target correlation, the reordered projects do too.
+
+        The permutation must map the project's own cashflow ordering onto the
+        target ordering: the path with the k-th smallest total cashflow has to
+        land where the k-th smallest draw sits. A permutation built from the
+        draws alone reshuffles paths without regard to their magnitude, which
+        leaves the projects independent no matter what correlation was asked for.
 
         Returns:
-            vehicle_cashflows: shape (n_sims, T+1) — sum of project cashflows
-              after applying Cholesky-correlated shocks at vehicle level.
+            List of J arrays, each (n_sims, T_max+1), zero-padded to a common
+            horizon and reordered in place.
         """
         inputs = self.inputs
         vehicle = inputs.vehicles[vehicle_idx]
@@ -81,32 +92,46 @@ class PortfolioOptimizer:
                 cfs = np.concatenate([cfs, np.zeros((n_sims, pad_cols))], axis=1)
             project_cashflows.append(cfs)
 
-        # Re-correlate project cashflows at vehicle level using Cholesky
-        # We correlate per-period cashflow innovations across projects.
         J = len(project_cashflows)
-        corr = vehicle.corr_array  # (J, J)
         rng = np.random.default_rng(base_seed + 999)
 
-        # Generate J-dimensional correlated draws (n_sims, J)
-        corr_draws = cholesky_correlated_draws(n_sims, corr, rng)  # (n_sims, J)
+        # Rank reordering reproduces the *rank* correlation of the draws, and the
+        # rank correlation of a bivariate normal with linear correlation r is
+        # (6/pi)*arcsin(r/2) — measurably below r. Inverting that here means the
+        # matrix the user supplies is delivered as the achieved rank correlation
+        # rather than landing ~0.10 low at mid-range values.
+        target = np.asarray(vehicle.corr_array, dtype=float)
+        draw_corr = 2.0 * np.sin(np.pi * np.clip(target, -1.0, 1.0) / 6.0)
+        np.fill_diagonal(draw_corr, 1.0)
 
-        # Apply correlation adjustment: replace project returns with correlated ordering.
-        # Method: rank-based reordering (Iman-Conover style). For each project j,
-        # reorder its simulation paths to match the rank ordering from corr_draws[:, j].
+        corr_draws = cholesky_correlated_draws(n_sims, draw_corr, rng)  # (n_sims, J)
+
         correlated_cfs = []
         for j in range(J):
-            cfs = project_cashflows[j]  # (n_sims, T+1)
-            target_ranks = np.argsort(np.argsort(corr_draws[:, j]))  # rank of each path
-            source_ranks = np.argsort(np.argsort(cfs.sum(axis=1)))   # rank by total CF
-            # Reorder: path with rank k in source gets the position of rank k in target
-            reorder_idx = np.empty(n_sims, dtype=int)
-            reorder_idx[target_ranks] = np.arange(n_sims)
-            cfs_reordered = cfs[reorder_idx]
-            correlated_cfs.append(cfs_reordered)
+            cfs = project_cashflows[j]                               # (n_sims, T+1)
+            # target_ranks[i] = rank the path at output position i should have
+            target_ranks = np.argsort(np.argsort(corr_draws[:, j]))
+            # sorted_idx[k] = index of the path with the k-th smallest total CF
+            sorted_idx = np.argsort(cfs.sum(axis=1))
+            # Output position i receives the path whose CF rank matches the draw
+            # rank at i, so CF ranks now co-move exactly as the draws do.
+            correlated_cfs.append(cfs[sorted_idx[target_ranks]])
 
-        # Sum across projects → vehicle cashflows
-        vehicle_cashflows = np.sum(correlated_cfs, axis=0)  # (n_sims, T+1)
-        return vehicle_cashflows
+        return correlated_cfs
+
+    def _simulate_vehicle(
+        self,
+        vehicle_idx: int,
+        seed_offset: int,
+    ) -> np.ndarray:
+        """Run correlated Monte Carlo for all projects in a vehicle.
+
+        Returns:
+            vehicle_cashflows: shape (n_sims, T+1) — sum of project cashflows
+              after applying Cholesky-correlated shocks at vehicle level.
+        """
+        correlated_cfs = self._correlated_project_cashflows(vehicle_idx, seed_offset)
+        return np.sum(correlated_cfs, axis=0)  # (n_sims, T+1)
 
     # ------------------------------------------------------------------
     # Step 2: Build CapitalStack and calibrate alpha* per vehicle
@@ -143,13 +168,15 @@ class PortfolioOptimizer:
         try:
             return calibrator.calibrate()
         except ValueError as exc:
-            warnings.warn(
-                f"Vehicle {vehicle_idx} calibration failed: {exc}. "
-                "Using alpha=0.99 as fallback.",
-                RuntimeWarning,
-                stacklevel=3,
-            )
-            return 0.99
+            # No silent fallback. The old alpha=0.99 fallback reported a vehicle
+            # as needing 99% catalytic capital when what actually happened is
+            # that no catalytic fraction works — a very different answer, and one
+            # the caller cannot distinguish from a real result.
+            name = self.inputs.vehicles[vehicle_idx]
+            raise ValueError(
+                f"Vehicle {vehicle_idx} (capital ${name.total_capital:,.0f}) "
+                f"cannot be calibrated: {exc}"
+            ) from exc
 
     # ------------------------------------------------------------------
     # Step 3: Extract per-vehicle loss and return distributions
@@ -232,6 +259,10 @@ class PortfolioOptimizer:
             w <= vehicle_capacities,
         ]
 
+        # Per-vehicle concentration limit, as a fraction of the total budget.
+        if cfg.max_allocation_fraction < 1.0:
+            constraints.append(w <= cfg.max_allocation_fraction * B)
+
         if cfg.catalytic_budget is not None:
             # New mode: catalytic budget constraint (foundation's catalytic capital limit)
             constraints.append(c @ w <= cfg.catalytic_budget)
@@ -245,37 +276,62 @@ class PortfolioOptimizer:
         if cfg.min_deployment > 0.0:
             constraints.append(cp.sum(w) >= cfg.min_deployment)
 
-        # Minimum expected return constraint
+        # Minimum expected return constraint.
+        # The quantity of interest is the capital-weighted mean return,
+        #   mean_s (R.T @ w)[s] / sum(w) >= R_min,
+        # whose denominator is a decision variable. Multiplying through by
+        # sum(w) >= 0 keeps it linear and, unlike dividing by the fixed budget B,
+        # keeps the constraint meaning the same thing whatever fraction of the
+        # budget is actually deployed.
         if cfg.min_expected_return > 0:
-            # Mean portfolio return = (1/S) * sum_s (R.T @ w)[s] / sum(w)
-            # Approximated as: (1/(S*B)) * sum_s (R.T @ w)[s] >= R_min
             constraints.append(
-                (1.0 / (S * B)) * cp.sum(R.T @ w) >= cfg.min_expected_return
+                (1.0 / S) * cp.sum(R.T @ w) >= cfg.min_expected_return * cp.sum(w)
             )
 
-        # CVaR constraint (Rockafellar-Uryasev)
-        # Portfolio loss rate = (1/B) * sum_v w_v * l_v[s] = (L.T @ w) / B
-        portfolio_loss = (L.T @ w) / B  # shape (S,)
+        # CVaR constraint (Rockafellar-Uryasev), on dollar losses.
+        # CVaR is positively homogeneous, so constraining the portfolio *loss
+        # rate* (dollar loss / capital deployed) is the same as
+        #   CVaR(dollar loss) <= cvar_max * sum(w),
+        # which is linear. This is the basis the result is reported on, so the
+        # number the caller reads is directly comparable to cvar_max.
+        portfolio_loss = L.T @ w  # shape (S,), dollars
         constraints += [
-            zeta + (1.0 / (S * (1.0 - beta))) * cp.sum(u) <= cfg.cvar_max,
+            zeta + (1.0 / (S * (1.0 - beta))) * cp.sum(u)
+            <= cfg.cvar_max * cp.sum(w),
             u >= portfolio_loss - zeta,
         ]
 
         problem = cp.Problem(objective, constraints)
 
-        # Try CLARABEL first, fall back to ECOS/SCS
+        # Try CLARABEL first, fall back to ECOS/SCS. A problem the solver proves
+        # infeasible or unbounded will not become feasible under a different
+        # solver, so only retry on solver *failure*.
         for solver in [cp.CLARABEL, cp.ECOS, cp.SCS]:
             try:
                 problem.solve(solver=solver, verbose=False)
-                if problem.status in [cp.OPTIMAL, cp.OPTIMAL_INACCURATE]:
-                    break
             except Exception:
                 continue
+            if problem.status in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
+                break
+            if problem.status in (cp.INFEASIBLE, cp.UNBOUNDED):
+                break
+
+        status = problem.status or "failed"
 
         if w.value is None:
-            return np.full(N_v, B / N_v), problem.status or "failed"
+            # Do not invent an allocation. An equal split looks like an answer
+            # while satisfying none of the constraints, and callers that only
+            # render the numbers will never notice.
+            warnings.warn(
+                f"Portfolio LP did not solve (status: {status}). Returning zero "
+                "allocations — check cvar_max, min_deployment and the catalytic "
+                "budget against the calibrated vehicles.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return np.zeros(N_v), status
 
-        return np.maximum(0.0, w.value), problem.status or "optimal"
+        return np.maximum(0.0, w.value), status
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -316,12 +372,18 @@ class PortfolioOptimizer:
 
         total_catalytic = sum(catalytic_allocs.values())
         total_commercial = sum(commercial_allocs.values())
-        leverage = total_commercial / max(total_catalytic, 1e-9)
+        # No catalytic capital required is a real outcome, not a divide-by-zero to
+        # paper over: max(x, 1e-9) turned it into a meaningless 1e16x leverage.
+        leverage = (
+            float("inf") if total_catalytic <= 0.0
+            else total_commercial / total_catalytic
+        )
 
         # Marginal catalytic efficiency per vehicle = (1-alpha)/alpha (leverage at min feasible alpha).
         # This is the commercial capital mobilized per unit of catalytic capital deployed.
         marginal_eff = {
-            v: (1.0 - all_alphas[v]) / max(all_alphas[v], 1e-9)
+            v: (float("inf") if all_alphas[v] <= 0.0
+                else (1.0 - all_alphas[v]) / all_alphas[v])
             for v in range(N_v)
         }
 
@@ -334,6 +396,7 @@ class PortfolioOptimizer:
             portfolio_return_paths += weight * all_return_rates[v]
             portfolio_loss_paths += weight * all_loss_rates[v]
 
+        # Reported on the same basis the LP constrains: loss per dollar deployed.
         portfolio_cvar = cvar(portfolio_loss_paths, inputs.cvar_confidence)
 
         return PortfolioResult(

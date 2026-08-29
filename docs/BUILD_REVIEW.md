@@ -1,5 +1,11 @@
 # Independent Build Review
 
+> **Status: all findings resolved.** Fixes landed in the commit following this
+> document. `scripts/review_repro.py` now *verifies* the fixed behaviour and exits
+> non-zero on regression; `tests/test_review_properties.py` holds the same
+> properties as unit tests. See "What the fixes changed" at the end for
+> before/after numbers.
+
 Reviewed at commit `ed9c1c0`. Suite state at review time: **146 passed** in 75s;
 `run_e2e.py --sims 300 --seed 42` completes in 4.4s with solver status `optimal`.
 
@@ -25,7 +31,7 @@ than the economics require.
 ## Critical
 
 ### F1 — Excess cash leaks to equity every period, so senior principal is never repaid
-`calibration/vehicle/capital_stack.py:191`
+`calibration/vehicle/capital_stack.py:191` · **FIXED**
 
 A vehicle returning 3× its capital ($30M inflows on $10M invested, deterministic)
 still leaves senior $5.6M short of principal while equity takes $21.2M:
@@ -49,7 +55,7 @@ account that traps cash once the coupon is met and releases residual to equity o
 after the maturity obligation is funded. Confined to `_cashflow_waterfall`.
 
 ### F2 — The correlation matrix has no effect on anything
-`calibration/portfolio/optimizer.py:96–105`
+`calibration/portfolio/optimizer.py:96–105` · **FIXED**
 
 The Iman-Conover reordering computes `source_ranks` on line 100 and never uses it.
 The applied permutation derives only from the target draws, so it never aligns paths
@@ -83,7 +89,7 @@ reorder_idx = sorted_idx[target_ranks]
 Verified to recover ρ = 0.504 and 0.900 against targets of 0.5 and 0.9.
 
 ### F3 — Any IRR above 1000% is recorded as a total loss
-`calibration/utils/irr.py:89`
+`calibration/utils/irr.py:89` · **FIXED**
 
 `_irr_single` brackets in [−0.999, 10.0] and returns `NaN` when NPV has the same sign
 at both ends. For a very profitable path NPV is still positive at r = 10, so it
@@ -106,7 +112,7 @@ emitting "100.0% of IRR paths returned NaN".
 `npv_lo < 0`; reserve `NaN` for genuinely undefined paths.
 
 ### F4 — CVaR collapses when losses are mostly zero, which is the normal case
-`calibration/utils/stats.py:12–18`
+`calibration/utils/stats.py:12–18` · **FIXED**
 
 `cvar()` selects its tail with `losses >= threshold`. A senior tranche loses in only a
 few percent of scenarios, so VaR(95%) is exactly zero and the comparison admits every
@@ -131,7 +137,7 @@ risk constraint — always in the reassuring direction. The e2e run's
 ## High
 
 ### F5 — Hurdle at or above the senior coupon silently returns a fake answer
-`calibration/vehicle/calibration.py:148`
+`calibration/vehicle/calibration.py:148` · **FIXED**
 
 Senior IRR is structurally capped at the coupon — the waterfall never pays senior more
 than coupon plus principal. So when `investor_hurdle_irr >= senior_coupon`, the only
@@ -155,7 +161,7 @@ whose senior notional falls below a floor (say 5% of total capital) as infeasibl
 rather than as a root. Both belong in `_h` so the grid fallback inherits them.
 
 ### F6 — The guarantee and grant reserve cannot affect senior IRR at all
-`calibration/vehicle/capital_stack.py:229`
+`calibration/vehicle/capital_stack.py:229` · **FIXED**
 
 The two waterfalls never meet. Loss absorption runs once at maturity on an NPV figure;
 senior IRR comes from the cashflow waterfall, which the mitigants never enter.
@@ -177,7 +183,7 @@ in a period, draw the reserve then the guarantee to top up the payment and recor
 senior cash received. Same change surface as F1; do them together.
 
 ### F7 — The LP constrains CVaR on one denominator and reports it on another
-`calibration/portfolio/optimizer.py:258` vs `:335`
+`calibration/portfolio/optimizer.py:258` vs `:335` · **FIXED**
 
 The constraint normalises by `total_budget` (`(L.T @ w) / B`); the reported
 distribution normalises by capital deployed (`w_v / sum(w)`). In catalytic-budget mode
@@ -188,7 +194,7 @@ the return floor in proportion to how little is deployed.
 **Fix:** pick one basis and use it in both places, or state the basis in the UI.
 
 ### F8 — A failed LP silently returns an equal split
-`calibration/portfolio/optimizer.py:275`
+`calibration/portfolio/optimizer.py:275` · **FIXED**
 
 When no solver produces a solution, `_solve_lp` returns `np.full(N_v, B / N_v)` — a
 plausible-looking allocation that never satisfied any constraint. Nothing in `run()` or
@@ -242,3 +248,71 @@ Warnings that indicate corrupted output should be promoted to failures.
 
 Add the three property tests before any of it, so the fixes have something to prove
 themselves against.
+
+
+---
+
+## What the fixes changed
+
+### Resolutions
+
+| # | Resolution |
+|---|---|
+| F1 | Sinking-fund cash retention in `_cashflow_waterfall`: after coupons, cash is held to `(senior + mezz outstanding) * t / T` before equity receives a residual, and the balance stays liquid so it also absorbs coupon shortfalls. |
+| F2 | `reorder_idx = np.argsort(cfs.sum(axis=1))[target_ranks]`. `correlation_matrix` is now documented and tested as a **rank** correlation, with the normal-copula transform applied so the requested rho is the achieved rho. |
+| F3 | A same-sign bracket reports the bound it fell past (`10.0` / `-0.999`) instead of `NaN`. `batch_irr` was also rewritten as vectorised bisection — agrees with the scalar solver to 3e-9, ~25x faster. |
+| F4 | `cvar()` averages the worst `ceil((1-confidence)*n)` losses by rank instead of selecting `losses >= VaR`. |
+| F5 | `investor_hurdle_irr >= senior_coupon` raises at calibration time; the search is capped at `1 - mezzanine_fraction - min_senior_fraction`; the returned alpha is feasibility-checked. The `CalibratorConfig` default hurdle moved 0.08 -> 0.07, because 0.08 collided with the default `senior_coupon` and made the out-of-the-box configuration unsatisfiable. |
+| F6 | The grant reserve seeds the retained cash balance and the guarantee is drawn to cover senior shortfalls, capped at `coverage * senior notional`. |
+| F7 | The CVaR constraint is expressed on dollar losses against `cvar_max * sum(w)` — linear by positive homogeneity — so it is stated on the same deployed-capital basis the result is reported on. `min_expected_return` likewise multiplies through by `sum(w)` rather than dividing by the fixed budget. |
+| F8 | A failed LP warns and returns zeros rather than an equal split, and infeasible/unbounded no longer retries across three solvers. `PortfolioOptimizer` also no longer falls back to `alpha=0.99` when a vehicle cannot be calibrated — it raises, naming the vehicle. |
+| Medium | `max_allocation_fraction` enforced; `_find_bracket` dead code removed and the monotonicity probe reused to seed the brentq bracket; `nearest_positive_definite` docstring corrected and its PD test given a tolerance; volatility estimated with `ddof=1`; `CALIBRATION_REQUIRE_AUTH=1` added for fail-closed auth; infinite leverage rendered as `n/a` instead of `1e16x`. |
+
+### Before / after
+
+Identical inputs, measured against both engines: one vehicle, $7.2M capital, three
+projects, 10-year horizon, 7% hurdle against an 8% senior coupon, 25% guarantee,
+$360k grant reserve, 600 paths, seed 42.
+
+| | before | after |
+|---|---|---|
+| alpha* | 0.7999 | 0.2209 |
+| leverage | 0.25x | 3.53x |
+| alpha as rho goes 0.0 -> 0.8 | 0.7960 -> 0.8002 (inert) | 0.1859 -> 0.2692 |
+| alpha as guarantee goes 0% -> 60% | 0.7999 -> 0.7999 (inert) | 0.344 -> 0.000 |
+| portfolio CVaR, UI sample data | 0.0% always | 13.9% |
+| test suite | 146 passed, 76s | 164 passed, 10s |
+
+The pre-fix alpha of 80% was dominated by the cash leak starving senior of principal.
+The post-fix figure is the honest requirement for these inputs.
+
+### Two changes that need your sign-off
+
+**1. Sample data was rescaled.** The built-in `run_e2e.py` portfolio and all nine
+`examples/ui_sample/*.csv` files described projects returning 3.7x-8.9x their capex
+over their lifetime — one earned $2.7M/year on $2M of capex. Vehicles that profitable
+need no concessional capital at all, and with F1 fixed they calibrate to alpha = 0.
+They produced plausible-looking alphas before only because the cash leak was
+cancelling the implausible economics out.
+
+Yields were scaled down (built-in: x0.13; CSVs: per-file, preserving the relative risk
+ordering the author wrote) so lifetime net cash is 0.25x-0.75x capex — the marginal
+economics a blended-finance vehicle exists to address. **These are illustrative
+figures chosen so the demo exercises the tool, not domain estimates.** Please
+sanity-check them against real project economics.
+
+**2. Two existing IRR tests were changed.** `test_high_irr_capped_at_bracket` asserted
+`np.isnan(r)` despite its own name, and its comment read "Should return ~10.0 ... or
+NaN"; it now asserts the cap. `test_non_converging_returns_nan_no_warning` asserted
+NaN for a cashflow its own comment identified as having an IRR below the bracket
+floor; it now asserts the floor and is renamed accordingly. Both encoded the F3
+defect. No other pre-existing test was modified.
+
+### Verification
+
+```bash
+python -m pytest tests/ -q          # 164 passed
+python scripts/review_repro.py      # per-finding checks; exits non-zero on regression
+python run_e2e.py --sims 400 --seed 42
+python validate_e2e.py              # 18 checks
+```

@@ -132,6 +132,20 @@ def validate_df(df: pd.DataFrame, filename: str) -> tuple[list[str], list[str]]:
 # Model builders
 # ---------------------------------------------------------------------------
 
+def _lev_delta(base: float, mod: float) -> str:
+    """Format a change in leverage, tolerating an infinite endpoint."""
+    if not (np.isfinite(base) and np.isfinite(mod)):
+        return "n/a"
+    return f"{mod - base:+.2f}\u00d7"
+
+
+def _lev(value: float) -> str:
+    """Format a leverage multiple. Infinite means no catalytic capital was needed."""
+    if value is None or not np.isfinite(value):
+        return "n/a"
+    return f"{value:.2f}\u00d7"
+
+
 def _capex_sum(projects: list[ProjectInputs]) -> float:
     total = 0.0
     for p in projects:
@@ -384,7 +398,7 @@ def _effective_horizon(inputs) -> int:
 def _vehicle_commentary(name: str, alpha: float, leverage: float, hurdle: float,
                          median_irr: float, cvar: float, n_sims: int) -> str:
     conc_pct = f"{alpha:.0%}"
-    lev_str  = f"{leverage:.1f}\u00d7"
+    lev_str  = _lev(leverage)
 
     if alpha < 0.20:
         eff_note = ("This is a capital-efficient structure — most of the return comes from "
@@ -438,7 +452,7 @@ def _portfolio_commentary(result, inputs, names: list[str]) -> str:
     return (
         f"Across {n_active} active vehicle(s), **${total_cat/1e6:.1f}M of catalytic capital "
         f"mobilises ${total_com/1e6:.1f}M of commercial investment** (portfolio leverage: "
-        f"**{lev:.1f}\u00d7**). "
+        f"**{_lev(lev)}**). "
         f"All senior tranches were calibrated to a **{hurdle:.1%} IRR hurdle** over a "
         f"**{horizon}-year** investment horizon. "
         f"The blended portfolio CVaR\u2085 is **{cvar:.1%}** — the expected loss rate "
@@ -451,7 +465,8 @@ def _sensitivity_commentary(base, mod, test_id: str, label: str) -> str:
     base_alpha = float(np.mean(list(base.catalytic_fractions.values())))
     mod_alpha  = float(np.mean(list(mod.catalytic_fractions.values())))
     d_alpha = mod_alpha - base_alpha
-    d_lev   = mod.leverage_ratio - base.leverage_ratio
+    finite_lev = np.isfinite(base.leverage_ratio) and np.isfinite(mod.leverage_ratio)
+    d_lev   = (mod.leverage_ratio - base.leverage_ratio) if finite_lev else 0.0
     d_cvar  = mod.cvar_95 - base.cvar_95
 
     alpha_dir = "rises" if d_alpha > 0 else "falls"
@@ -463,8 +478,11 @@ def _sensitivity_commentary(base, mod, test_id: str, label: str) -> str:
         f"({base_alpha:.1%} \u2192 {mod_alpha:.1%})."
     )
     lev_note = (
-        f"Portfolio leverage {lev_dir} to **{mod.leverage_ratio:.1f}\u00d7** "
-        f"(from {base.leverage_ratio:.1f}\u00d7)."
+        f"Portfolio leverage {lev_dir} to **{_lev(mod.leverage_ratio)}** "
+        f"(from {_lev(base.leverage_ratio)})."
+        if finite_lev else
+        "Portfolio leverage is undefined in at least one case — a vehicle needed "
+        "no catalytic capital at all."
     )
     cvar_note = (
         f"Senior tail-loss risk (CVaR\u2085) {cvar_dir} to **{mod.cvar_95:.1%}** "
@@ -637,12 +655,16 @@ def _export_csv(result, names: list[str]) -> str:
                      "catalytic_usd": result.catalytic_allocations.get(i, 0),
                      "commercial_usd": result.commercial_allocations.get(i, 0),
                      "alpha": result.catalytic_fractions.get(i, 0),
-                     "leverage_x": result.marginal_catalytic_efficiency.get(i, 0)})
+                     "leverage_x": (result.marginal_catalytic_efficiency.get(i, 0)
+                                    if np.isfinite(result.marginal_catalytic_efficiency.get(i, 0))
+                                    else "")})
     rows.append({"vehicle": "PORTFOLIO",
                  "allocation_usd": sum(result.allocations.values()),
                  "catalytic_usd": sum(result.catalytic_allocations.values()),
                  "commercial_usd": sum(result.commercial_allocations.values()),
-                 "alpha": "", "leverage_x": result.leverage_ratio})
+                 "alpha": "",
+                 "leverage_x": (result.leverage_ratio
+                                if np.isfinite(result.leverage_ratio) else "")})
     return pd.DataFrame(rows).to_csv(index=False)
 
 
@@ -681,7 +703,7 @@ def page_results() -> None:
     k1.metric("Catalytic Capital",
               f"${total_cat/1e6:.1f}M",
               f"{total_cat/max(total_dep,1):.1%} of deployed")
-    k2.metric("Portfolio Leverage", f"{result.leverage_ratio:.2f}×",
+    k2.metric("Portfolio Leverage", _lev(result.leverage_ratio),
               "commercial per catalytic $")
     k3.metric(f"Median IRR  (hurdle {hurdle:.0%})",
               f"{median_irr:.1%}" if np.isfinite(median_irr) else "N/A",
@@ -770,9 +792,9 @@ def _sens_comparison(base, mod, names: list[str], label: str) -> None:
     rows = [
         {"Metric": "Mean Alpha", "Base": f"{ba:.1%}", "Modified": f"{ma:.1%}",
          "Δ": f"{(ma-ba)*100:+.1f} pp"},
-        {"Metric": "Portfolio Leverage", "Base": f"{base.leverage_ratio:.2f}×",
-         "Modified": f"{mod.leverage_ratio:.2f}×",
-         "Δ": f"{mod.leverage_ratio-base.leverage_ratio:+.2f}×"},
+        {"Metric": "Portfolio Leverage", "Base": _lev(base.leverage_ratio),
+         "Modified": _lev(mod.leverage_ratio),
+         "Δ": _lev_delta(base.leverage_ratio, mod.leverage_ratio)},
         {"Metric": "Median IRR",
          "Base": f"{bm:.1%}" if np.isfinite(bm) else "N/A",
          "Modified": f"{mm:.1%}" if np.isfinite(mm) else "N/A",
