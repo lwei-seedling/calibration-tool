@@ -39,22 +39,23 @@ MAX_ROWS = 30
 
 TEMPLATE_CARBON = """\
 year,yield,capex,opex,revenue_type,base_price,price_growth_rate,price_vol
-2025,0,3000000,80000,carbon,15.0,0.05,0.30
-2026,0,1500000,80000,carbon,15.0,0.05,0.30
-2027,20000,0,120000,carbon,15.0,0.05,0.30
-2028,35000,0,120000,carbon,15.0,0.05,0.30
-2029,50000,0,120000,carbon,15.0,0.05,0.30
-2030,50000,0,120000,carbon,15.0,0.05,0.30
-2031,50000,0,120000,carbon,15.0,0.05,0.30
-2032,50000,0,120000,carbon,15.0,0.05,0.30
-2033,50000,0,120000,carbon,15.0,0.05,0.30
-2034,50000,0,120000,carbon,15.0,0.05,0.30
-2035,50000,0,120000,carbon,15.0,0.05,0.30
-2036,50000,0,120000,carbon,15.0,0.05,0.30
-2037,50000,0,120000,carbon,15.0,0.05,0.30
-2038,50000,0,120000,carbon,15.0,0.05,0.30
-2039,50000,0,120000,carbon,15.0,0.05,0.30
-2040,50000,0,120000,carbon,15.0,0.05,0.30
+2025,0,1080000,21000,carbon,26.0,0.03,0.245
+2026,0,720000,21000,carbon,26.0,0.03,0.245
+2027,2100,0,60000,carbon,26.0,0.03,0.245
+2028,3800,0,60000,carbon,26.0,0.03,0.245
+2029,5501,0,60000,carbon,26.0,0.03,0.245
+2030,7200,0,60000,carbon,26.0,0.03,0.245
+2031,8900,0,60000,carbon,26.0,0.03,0.245
+2032,10599,0,60000,carbon,26.0,0.03,0.245
+2033,12300,0,60000,carbon,26.0,0.03,0.245
+2034,14000,0,60000,carbon,26.0,0.03,0.245
+2035,14000,0,60000,carbon,26.0,0.03,0.245
+2036,14000,0,60000,carbon,26.0,0.03,0.245
+2037,14000,0,60000,carbon,26.0,0.03,0.245
+2038,14000,0,60000,carbon,26.0,0.03,0.245
+2039,14000,0,60000,carbon,26.0,0.03,0.245
+2040,14000,0,60000,carbon,26.0,0.03,0.245
+2041,14000,0,60000,carbon,26.0,0.03,0.245
 """
 
 TEMPLATE_COMMODITY = """\
@@ -131,6 +132,20 @@ def validate_df(df: pd.DataFrame, filename: str) -> tuple[list[str], list[str]]:
 # ---------------------------------------------------------------------------
 # Model builders
 # ---------------------------------------------------------------------------
+
+def _lev_delta(base: float, mod: float) -> str:
+    """Format a change in leverage, tolerating an infinite endpoint."""
+    if not (np.isfinite(base) and np.isfinite(mod)):
+        return "n/a"
+    return f"{mod - base:+.2f}\u00d7"
+
+
+def _lev(value: float) -> str:
+    """Format a leverage multiple. Infinite means no catalytic capital was needed."""
+    if value is None or not np.isfinite(value):
+        return "n/a"
+    return f"{value:.2f}\u00d7"
+
 
 def _capex_sum(projects: list[ProjectInputs]) -> float:
     total = 0.0
@@ -384,7 +399,7 @@ def _effective_horizon(inputs) -> int:
 def _vehicle_commentary(name: str, alpha: float, leverage: float, hurdle: float,
                          median_irr: float, cvar: float, n_sims: int) -> str:
     conc_pct = f"{alpha:.0%}"
-    lev_str  = f"{leverage:.1f}\u00d7"
+    lev_str  = _lev(leverage)
 
     if alpha < 0.20:
         eff_note = ("This is a capital-efficient structure — most of the return comes from "
@@ -438,7 +453,7 @@ def _portfolio_commentary(result, inputs, names: list[str]) -> str:
     return (
         f"Across {n_active} active vehicle(s), **${total_cat/1e6:.1f}M of catalytic capital "
         f"mobilises ${total_com/1e6:.1f}M of commercial investment** (portfolio leverage: "
-        f"**{lev:.1f}\u00d7**). "
+        f"**{_lev(lev)}**). "
         f"All senior tranches were calibrated to a **{hurdle:.1%} IRR hurdle** over a "
         f"**{horizon}-year** investment horizon. "
         f"The blended portfolio CVaR\u2085 is **{cvar:.1%}** — the expected loss rate "
@@ -451,7 +466,8 @@ def _sensitivity_commentary(base, mod, test_id: str, label: str) -> str:
     base_alpha = float(np.mean(list(base.catalytic_fractions.values())))
     mod_alpha  = float(np.mean(list(mod.catalytic_fractions.values())))
     d_alpha = mod_alpha - base_alpha
-    d_lev   = mod.leverage_ratio - base.leverage_ratio
+    finite_lev = np.isfinite(base.leverage_ratio) and np.isfinite(mod.leverage_ratio)
+    d_lev   = (mod.leverage_ratio - base.leverage_ratio) if finite_lev else 0.0
     d_cvar  = mod.cvar_95 - base.cvar_95
 
     alpha_dir = "rises" if d_alpha > 0 else "falls"
@@ -463,8 +479,11 @@ def _sensitivity_commentary(base, mod, test_id: str, label: str) -> str:
         f"({base_alpha:.1%} \u2192 {mod_alpha:.1%})."
     )
     lev_note = (
-        f"Portfolio leverage {lev_dir} to **{mod.leverage_ratio:.1f}\u00d7** "
-        f"(from {base.leverage_ratio:.1f}\u00d7)."
+        f"Portfolio leverage {lev_dir} to **{_lev(mod.leverage_ratio)}** "
+        f"(from {_lev(base.leverage_ratio)})."
+        if finite_lev else
+        "Portfolio leverage is undefined in at least one case — a vehicle needed "
+        "no catalytic capital at all."
     )
     cvar_note = (
         f"Senior tail-loss risk (CVaR\u2085) {cvar_dir} to **{mod.cvar_95:.1%}** "
@@ -637,12 +656,16 @@ def _export_csv(result, names: list[str]) -> str:
                      "catalytic_usd": result.catalytic_allocations.get(i, 0),
                      "commercial_usd": result.commercial_allocations.get(i, 0),
                      "alpha": result.catalytic_fractions.get(i, 0),
-                     "leverage_x": result.marginal_catalytic_efficiency.get(i, 0)})
+                     "leverage_x": (result.marginal_catalytic_efficiency.get(i, 0)
+                                    if np.isfinite(result.marginal_catalytic_efficiency.get(i, 0))
+                                    else "")})
     rows.append({"vehicle": "PORTFOLIO",
                  "allocation_usd": sum(result.allocations.values()),
                  "catalytic_usd": sum(result.catalytic_allocations.values()),
                  "commercial_usd": sum(result.commercial_allocations.values()),
-                 "alpha": "", "leverage_x": result.leverage_ratio})
+                 "alpha": "",
+                 "leverage_x": (result.leverage_ratio
+                                if np.isfinite(result.leverage_ratio) else "")})
     return pd.DataFrame(rows).to_csv(index=False)
 
 
@@ -681,7 +704,7 @@ def page_results() -> None:
     k1.metric("Catalytic Capital",
               f"${total_cat/1e6:.1f}M",
               f"{total_cat/max(total_dep,1):.1%} of deployed")
-    k2.metric("Portfolio Leverage", f"{result.leverage_ratio:.2f}×",
+    k2.metric("Portfolio Leverage", _lev(result.leverage_ratio),
               "commercial per catalytic $")
     k3.metric(f"Median IRR  (hurdle {hurdle:.0%})",
               f"{median_irr:.1%}" if np.isfinite(median_irr) else "N/A",
@@ -711,9 +734,13 @@ def page_results() -> None:
                      "Alpha": f"{result.catalytic_fractions.get(i,0):.1%}",
                      "Catalytic": f"${cat/1e6:.1f}M",
                      "Commercial": f"${com/1e6:.1f}M",
-                     "Leverage": f"{com/max(cat,1):.1f}×",
-                     "Marg. Eff.": f"{result.marginal_catalytic_efficiency.get(i,0):.1f}×"})
-    rows.sort(key=lambda r: float(r["Leverage"].replace("×", "")), reverse=True)
+                     "Leverage": _lev(com / cat if cat > 0 else float("inf")),
+                     "Marg. Eff.": _lev(result.marginal_catalytic_efficiency.get(i, 0))})
+    rows.sort(
+        key=lambda r: float("inf") if r["Leverage"] == "n/a"
+        else float(r["Leverage"].rstrip("×")),
+        reverse=True,
+    )
     st.dataframe(pd.DataFrame(rows).set_index("Vehicle"))
 
     # --- Plain language commentary (Enhancement C) ---
@@ -724,7 +751,7 @@ def page_results() -> None:
             alpha   = result.catalytic_fractions.get(i, 0)
             cat     = result.catalytic_allocations.get(i, 0)
             com     = result.commercial_allocations.get(i, 0)
-            lev     = com / max(cat, 1)
+            lev     = com / cat if cat > 0 else float("inf")
             cvar    = result.cvar_95  # vehicle-level CVaR not separately stored; use portfolio
             # Compute median senior IRR if available via tranche results
             # (VehicleResult tranche IRRs not in PortfolioResult — use portfolio-level as proxy)
@@ -770,9 +797,9 @@ def _sens_comparison(base, mod, names: list[str], label: str) -> None:
     rows = [
         {"Metric": "Mean Alpha", "Base": f"{ba:.1%}", "Modified": f"{ma:.1%}",
          "Δ": f"{(ma-ba)*100:+.1f} pp"},
-        {"Metric": "Portfolio Leverage", "Base": f"{base.leverage_ratio:.2f}×",
-         "Modified": f"{mod.leverage_ratio:.2f}×",
-         "Δ": f"{mod.leverage_ratio-base.leverage_ratio:+.2f}×"},
+        {"Metric": "Portfolio Leverage", "Base": _lev(base.leverage_ratio),
+         "Modified": _lev(mod.leverage_ratio),
+         "Δ": _lev_delta(base.leverage_ratio, mod.leverage_ratio)},
         {"Metric": "Median IRR",
          "Base": f"{bm:.1%}" if np.isfinite(bm) else "N/A",
          "Modified": f"{mm:.1%}" if np.isfinite(mm) else "N/A",
@@ -946,10 +973,20 @@ same columns and the same price-simulation math. The label is for your reference
 
 | Project type | Yield units | Base price | Growth | Vol |
 |-------------|------------|-----------|--------|-----|
-| Forestry ARR | tCO2e / yr | $15 | 5 % | 30 % |
-| REDD+ | tCO2e / yr | $12 | 6 % | 35 % |
-| Biochar | tons / yr | $130–200 | 4 % | 28 % |
-| Agroforestry (cocoa) | tons / yr | $1,800 | 3 % | 22 % |
+| Forestry ARR | tCO2e / yr | $26 rated BBB+ (~$14 unrated) | 3 % | 25 % |
+| REDD+ | tCO2e / yr | $6 | 2 % | 41 % |
+| Biochar | tCO2e / yr | $130–200 | 2 % | 6 % |
+| Agroforestry | tCO2e / yr | $18–20 | 3 % | 28 % |
+| Cocoa (commodity) | tons / yr | market price | 3 % | 22 % |
+
+**Vol is revenue volatility, not spot carbon volatility.** Spot prices are far
+more volatile than these figures — nature-based credits run ~35 %, and REDD+
+lost 62 % of its value in a single year — but a project that forward-sells part
+of its volume only carries the volatility of the uncontracted balance. The
+figures above assume 30 % of volume is sold forward (70 % for biochar). If your
+project is fully merchant, use the spot numbers instead.
+
+Sources and reasoning for every figure: `docs/SAMPLE_DATA_SOURCES.md`.
 
 ## Run time
 ~30–90 s for 1,000 simulations with 3 vehicles (3–5 projects each).

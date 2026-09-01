@@ -62,13 +62,13 @@ class TestIrrSingle:
         assert np.isnan(_irr_single(cf))
 
     def test_high_irr_capped_at_bracket(self):
-        # -1 at t=0, huge payoff at t=1 → IRR very high, brentq hits upper bound
-        # Should return ~10.0 (the upper bracket limit) or NaN if NPV(10) > 0
+        # -1 at t=0, huge payoff at t=1 → true IRR ≈ 99999900%, far above _R_HI.
+        # NPV is positive at both endpoints (NPV(10) = -1 + 1e6/11 ≈ +90k), so the
+        # root lies above the bracket rather than being undefined: report the cap.
+        # Returning NaN here would send it through clean_irr's NaN branch and book
+        # a spectacular return as a total loss.
         cf = np.array([-1.0, 1_000_000.0])
-        r = _irr_single(cf)
-        # NPV(-0.999, cf) is large positive; NPV(10, cf) = -1 + 1e6/11 ≈ +90k > 0
-        # So both endpoints are positive → no bracket → NaN
-        assert np.isnan(r)
+        assert _irr_single(cf) == pytest.approx(10.0)
 
     def test_irr_near_lower_bound(self):
         # Near-total-loss: invest 1000, recover only 1 after 10 years.
@@ -96,14 +96,23 @@ class TestIrrSingle:
             r = _irr_single(cf)
         assert np.isfinite(r)
 
-    def test_non_converging_returns_nan_no_warning(self):
-        # Construct a cashflow where NPV has same sign at both bracket endpoints:
-        # invest 1, get 0.0001 back after 1 year → IRR ≈ -99.99%, below _R_LO=-0.999
+    def test_borrowing_shaped_cashflow_reports_correct_bound(self):
+        # Inflow first, outflow later: NPV is INCREASING in r, so both endpoints
+        # negative means the root is ABOVE the cap (true IRR here is +2900%).
+        # A hardcoded "NPV is decreasing" assumption reported this at -0.999.
+        cf = np.array([1.0, -30.0])
+        assert _irr_single(cf) == pytest.approx(10.0)
+        assert batch_irr(cf.reshape(1, -1))[0] == pytest.approx(10.0)
+
+    def test_irr_below_bracket_reports_floor_without_warning(self):
+        # Invest 1, get 0.0001 back after 1 year → IRR ≈ -99.99%, below _R_LO.
+        # NPV is negative at both endpoints, so the root lies below the bracket:
+        # report the floor. Must stay warning-free.
         cf = np.array([-1.0, 0.0001])
         with warnings.catch_warnings():
             warnings.simplefilter("error", RuntimeWarning)
             r = _irr_single(cf)
-        assert np.isnan(r)
+        assert r == pytest.approx(-0.999)
 
 
 # ---------------------------------------------------------------------------

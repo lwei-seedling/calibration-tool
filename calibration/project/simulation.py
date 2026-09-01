@@ -79,11 +79,16 @@ class ProjectSimulator:
 
         If price_series is provided, mu and sigma are estimated from log returns.
         Otherwise use price_drift (default 0.0) and price_vol.
+
+        Note: sigma uses the sample standard deviation (ddof=1). The population
+        form biases volatility low, which matters most on the short price series
+        this is typically handed. Returns are assumed to be annual — see
+        `load_price_series`, which annualises before this point.
         """
         if p.price_series is not None:
             log_returns = np.diff(np.log(np.asarray(p.price_series, dtype=float)))
             mu = float(np.mean(log_returns))
-            sigma = float(np.std(log_returns))
+            sigma = float(np.std(log_returns, ddof=1)) if log_returns.size > 1 else 0.0
         else:
             mu = p.price_drift if p.price_drift is not None else 0.0
             sigma = p.price_vol

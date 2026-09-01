@@ -151,12 +151,28 @@ class CapitalStack:
         vehicle_cashflows: np.ndarray,
         alpha: float,
     ) -> dict[str, np.ndarray]:
-        """Distribute per-period positive cashflows across tranches.
+        """Distribute per-period cashflows across tranches.
 
-        Uses a simplified bullet-maturity approximation:
-          - Coupons are paid annually on outstanding notionals.
-          - Principal returns entirely at terminal period T.
-          - Shortfalls accumulate in arrears and are paid first when cash is available.
+        Bullet maturity, with the two mechanisms that make it solvent:
+
+        **Cash retention (sinking fund).** Principal is contractually repaid at
+        T, so cash has to be held against it. After each period's coupons are
+        paid, cash is retained up to a target of ``(senior + mezzanine
+        outstanding) * t / T`` and only the excess is released to equity. The
+        retained balance is fully liquid: it is added back to available cash at
+        the start of the next period, so it also absorbs coupon shortfalls the
+        way a debt service reserve account does.
+
+        Without this the structure leaks every spare dollar to equity each
+        period and then cannot meet the bullet: a vehicle returning 3x its
+        capital still defaults on senior principal.
+
+        **Risk mitigants reach the tranche they protect.** The grant reserve
+        seeds the retained balance (it is donor cash, available to pay senior),
+        and the guarantee is drawn to make senior whole when cash falls short,
+        up to ``coverage * senior notional`` over the life of the vehicle. Both
+        are also layers in the loss waterfall; these are two views of the same
+        protection, not two separate pots.
 
         Args:
             vehicle_cashflows: shape (n_sims, T+1)
@@ -179,6 +195,9 @@ class CapitalStack:
         }
         tranche_cfs["senior"][:, 0] = -senior.notional
         tranche_cfs["mezzanine"][:, 0] = -mezz.notional
+        # The catalytic bucket funds both the first-loss tranche and the grant
+        # reserve, so it carries both as its t=0 outflow and receives whatever
+        # of the reserve is left over at maturity.
         tranche_cfs["first_loss"][:, 0] = -(fl.notional + self.grant_reserve.amount)
 
         # Track arrears per tranche (n_sims,)
@@ -188,36 +207,70 @@ class CapitalStack:
         senior_outstanding = np.full(n_sims, senior.notional)
         mezz_outstanding = np.full(n_sims, mezz.notional)
 
-        for t in range(1, T + 1):
-            available = np.maximum(0.0, vehicle_cashflows[:, t])
+        # Retained cash, seeded by the donor-funded grant reserve.
+        retained = np.full(n_sims, self.grant_reserve.amount)
 
-            # --- Senior ---
+        # Guarantee capacity available to top up senior payments over the life
+        # of the vehicle (0.0 when no guarantee is attached).
+        guarantee_remaining = np.full(
+            n_sims, self.guarantee.effective_cap(senior.notional)
+        )
+
+        for t in range(1, T + 1):
             is_terminal = (t == T)
+
+            # Retained cash is liquid: it funds this period's obligations before
+            # being topped back up below.
+            available = np.maximum(0.0, vehicle_cashflows[:, t]) + retained
+            retained = np.zeros(n_sims)
+
+            # --- Senior (coupon always; principal at maturity) ---
             senior_coupon_due = senior_outstanding * senior.coupon
             senior_principal_due = senior_outstanding if is_terminal else np.zeros(n_sims)
-            senior_due = senior_arrears + senior_coupon_due + senior_principal_due
+            senior_current_due = senior_arrears + senior_coupon_due
+            senior_due = senior_current_due + senior_principal_due
 
-            senior_paid = np.minimum(available, senior_due)
-            available -= senior_paid
-            senior_arrears = senior_due - senior_paid
-            # Update outstanding principal
-            principal_paid_sr = np.minimum(senior_paid, senior_principal_due)
+            paid_cash = np.minimum(available, senior_due)
+            available -= paid_cash
+
+            # The guarantee makes the senior noteholder whole on any residual
+            # shortfall, up to its remaining capacity.
+            shortfall = senior_due - paid_cash
+            guarantee_draw = np.minimum(shortfall, guarantee_remaining)
+            guarantee_remaining -= guarantee_draw
+
+            senior_received = paid_cash + guarantee_draw
+            senior_arrears = shortfall - guarantee_draw
+
+            # Receipts settle arrears, then coupon, then principal.
+            principal_paid_sr = np.clip(
+                senior_received - senior_current_due, 0.0, senior_principal_due
+            )
             senior_outstanding = np.maximum(0.0, senior_outstanding - principal_paid_sr)
-            tranche_cfs["senior"][:, t] = senior_paid
+            tranche_cfs["senior"][:, t] = senior_received
 
-            # --- Mezzanine ---
+            # --- Mezzanine (unguaranteed) ---
             mezz_coupon_due = mezz_outstanding * mezz.coupon
             mezz_principal_due = mezz_outstanding if is_terminal else np.zeros(n_sims)
-            mezz_due = mezz_arrears + mezz_coupon_due + mezz_principal_due
+            mezz_current_due = mezz_arrears + mezz_coupon_due
+            mezz_due = mezz_current_due + mezz_principal_due
 
             mezz_paid = np.minimum(available, mezz_due)
             available -= mezz_paid
             mezz_arrears = mezz_due - mezz_paid
-            principal_paid_mz = np.minimum(mezz_paid, mezz_principal_due)
+            principal_paid_mz = np.clip(
+                mezz_paid - mezz_current_due, 0.0, mezz_principal_due
+            )
             mezz_outstanding = np.maximum(0.0, mezz_outstanding - principal_paid_mz)
             tranche_cfs["mezzanine"][:, t] = mezz_paid
 
-            # --- First-loss / equity gets residual ---
+            # --- Retain cash against the bullet before releasing to equity ---
+            if not is_terminal:
+                target = (senior_outstanding + mezz_outstanding) * (t / T)
+                retained = np.minimum(available, target)
+                available -= retained
+
+            # --- First-loss / equity gets what is genuinely surplus ---
             tranche_cfs["first_loss"][:, t] = available
 
         return tranche_cfs

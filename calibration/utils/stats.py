@@ -10,18 +10,37 @@ def var(losses: np.ndarray, confidence: float = 0.95) -> float:
 
 
 def cvar(losses: np.ndarray, confidence: float = 0.95) -> float:
-    """Conditional Value at Risk (Expected Shortfall) at the given confidence level."""
-    threshold = var(losses, confidence)
-    tail = losses[losses >= threshold]
-    if len(tail) == 0:
-        return float(threshold)
-    return float(np.nanmean(tail))
+    """Conditional Value at Risk (Expected Shortfall) at the given confidence level.
+
+    Averages the worst ``ceil((1 - confidence) * n)`` losses by sort order.
+
+    Selecting the tail by rank rather than by ``losses >= VaR`` matters whenever
+    the loss distribution has an atom at its quantile — which is the *normal*
+    case for a senior tranche, where losses are zero in all but a few percent of
+    scenarios. There VaR is exactly 0.0, a ``>=`` comparison admits every
+    zero-loss path into the "tail", and the result collapses toward the mean of
+    the whole distribution instead of describing the tail.
+    """
+    losses = np.asarray(losses, dtype=float)
+    finite = losses[~np.isnan(losses)]
+    if finite.size == 0:
+        return float("nan")
+
+    # The epsilon absorbs binary representation error: (1 - 0.95) * 1000 is
+    # 50.00000000000004, which would otherwise round the tail up to 51 paths.
+    k = max(1, int(np.ceil((1.0 - confidence) * finite.size - 1e-9)))
+    tail = np.partition(finite, -k)[-k:]
+    return float(np.mean(tail))
 
 
 def nearest_positive_definite(matrix: np.ndarray) -> np.ndarray:
-    """Project a symmetric matrix to the nearest positive-definite matrix.
+    """Project a symmetric matrix to a nearby positive-definite correlation matrix.
 
-    Uses Higham's (2002) algorithm via eigenvalue clipping.
+    Symmetrises, clips negative eigenvalues to a small positive floor, then
+    rescales the diagonal back to 1. This is eigenvalue clipping, *not* Higham's
+    (2002) alternating-projection algorithm: it is a single projection and does
+    not claim to find the true nearest correlation matrix. It is cheap, stable,
+    and adequate for repairing the small J x J matrices used here.
     """
     # Symmetrize
     B = (matrix + matrix.T) / 2.0
@@ -59,9 +78,12 @@ def cholesky_correlated_draws(
     if not np.allclose(corr_matrix, corr_matrix.T, atol=1e-8):
         raise ValueError("Correlation matrix must be symmetric.")
 
-    # Check positive definiteness; apply nearest-PD if needed
+    # Check positive definiteness; apply nearest-PD if needed. The tolerance
+    # matters: a matrix whose smallest eigenvalue is a hair above zero passes a
+    # bare `> 0` test and then still fails Cholesky.
     eigenvalues = np.linalg.eigvalsh(corr_matrix)
-    if np.any(eigenvalues <= 0):
+    tol = 1e-8 * max(1.0, float(np.max(np.abs(eigenvalues))))
+    if np.any(eigenvalues <= tol):
         corr_matrix = nearest_positive_definite(corr_matrix)
 
     L = np.linalg.cholesky(corr_matrix)  # shape (D, D), lower triangular

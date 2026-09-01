@@ -20,6 +20,10 @@ Supported hash formats in ``secrets.toml`` under ``[auth].password_hash``:
   Salted, slow (390,000 iterations), resistant to offline brute-force.
 * **Legacy SHA-256** -- 64-char hex digest. Still verifies so existing
   deployments keep working, but rotate to PBKDF2 at your next opportunity.
+
+Set ``CALIBRATION_REQUIRE_AUTH=1`` in the deployment environment to fail closed
+when secrets cannot be read. Without it, a missing ``[auth]`` section means open
+access (convenient for local development, unsafe for a public deployment).
 """
 from __future__ import annotations
 
@@ -106,9 +110,20 @@ def check_auth() -> bool:
     # Any failure to read a well-formed [auth] section -> open-access (dev) mode.
     # Streamlit raises StreamlitSecretNotFoundError (KeyError subclass) when
     # secrets.toml is absent; a malformed section can surface as AttributeError.
+    require_auth = os.environ.get("CALIBRATION_REQUIRE_AUTH", "").strip().lower() in (
+        "1", "true", "yes", "on"
+    )
     try:
         auth_cfg = st.secrets["auth"]
     except (KeyError, FileNotFoundError, AttributeError):
+        if require_auth:
+            # Deployments that set CALIBRATION_REQUIRE_AUTH fail closed: an
+            # unreadable or missing secrets file must not silently unlock the app.
+            st.error(
+                "Auth is required for this deployment but no [auth] section could "
+                "be read from secrets. Access denied."
+            )
+            return False
         return True
 
     expected_hash = auth_cfg.get("password_hash", "")
