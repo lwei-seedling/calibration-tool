@@ -734,9 +734,13 @@ def page_results() -> None:
                      "Alpha": f"{result.catalytic_fractions.get(i,0):.1%}",
                      "Catalytic": f"${cat/1e6:.1f}M",
                      "Commercial": f"${com/1e6:.1f}M",
-                     "Leverage": f"{com/max(cat,1):.1f}×",
-                     "Marg. Eff.": f"{result.marginal_catalytic_efficiency.get(i,0):.1f}×"})
-    rows.sort(key=lambda r: float(r["Leverage"].replace("×", "")), reverse=True)
+                     "Leverage": _lev(com / cat if cat > 0 else float("inf")),
+                     "Marg. Eff.": _lev(result.marginal_catalytic_efficiency.get(i, 0))})
+    rows.sort(
+        key=lambda r: float("inf") if r["Leverage"] == "n/a"
+        else float(r["Leverage"].rstrip("×")),
+        reverse=True,
+    )
     st.dataframe(pd.DataFrame(rows).set_index("Vehicle"))
 
     # --- Plain language commentary (Enhancement C) ---
@@ -747,7 +751,7 @@ def page_results() -> None:
             alpha   = result.catalytic_fractions.get(i, 0)
             cat     = result.catalytic_allocations.get(i, 0)
             com     = result.commercial_allocations.get(i, 0)
-            lev     = com / max(cat, 1)
+            lev     = com / cat if cat > 0 else float("inf")
             cvar    = result.cvar_95  # vehicle-level CVaR not separately stored; use portfolio
             # Compute median senior IRR if available via tranche results
             # (VehicleResult tranche IRRs not in PortfolioResult — use portfolio-level as proxy)

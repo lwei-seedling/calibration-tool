@@ -318,7 +318,7 @@ defect. No other pre-existing test was modified.
 ### Verification
 
 ```bash
-python -m pytest tests/ -q          # 164 passed
+python -m pytest tests/ -q          # 166 passed
 python scripts/review_repro.py      # per-finding checks; exits non-zero on regression
 python run_e2e.py --sims 400 --seed 42
 python validate_e2e.py              # 18 checks

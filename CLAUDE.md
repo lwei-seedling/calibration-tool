@@ -403,8 +403,8 @@ base_cashflows=[-500_000, -300_000, 0, 180_000, …]  # t=0 and t=1 are construc
 The simulator uses the array as CF[0..T]; no scalar scaling is applied to negative periods.
 
 ### 5a. IRR sentinels
-- `-1.0` → total loss (no positive inflows, capex outflow present), or a true IRR
-  below the `-0.999` floor
+- `-1.0` → total loss (no positive inflows, capex outflow present)
+- `-0.999` → a true IRR below the bracket floor; the floor itself is reported
 - `10.0` → a true IRR above the 1000% cap. Reached when NPV is positive at *both*
   bracket endpoints: the root is outside the interval, not undefined. Previously
   this returned `NaN` and was then booked as `-1.0`, sign-flipping a spectacular

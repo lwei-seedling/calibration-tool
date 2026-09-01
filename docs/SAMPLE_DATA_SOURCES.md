@@ -157,10 +157,10 @@ What the sample data produces (800 paths, seed 42, 7% hurdle):
 
 | | UI sample (3 vehicles) | Built-in `run_e2e` (2 vehicles) |
 |---|---|---|
-| α by vehicle | 0.13 / 0.47 / 0.37 | 0.27 / 0.50 |
-| Portfolio leverage | ~2.3x | ~1.8x |
+| α by vehicle | 0.14 / 0.43 / 0.38 | 0.27 / 0.50 |
+| Portfolio leverage | ~2.4x | ~1.8x |
 | Catalytic share | ~30% | ~36% |
-| Portfolio CVaR (95%) | ~9% | ~0% |
+| Portfolio CVaR (95%) | ~8.5% | ~0% |
 
 That sits inside Convergence's observed range but below its 4.1x average, and
 the catalytic share is above the 10–20% investment-grade band. Both are

@@ -73,10 +73,10 @@ def _irr_single(cashflows: np.ndarray) -> float:
 
     Returns:
         IRR as a decimal (e.g. 0.12 for 12%).
-        -1.0  — total-loss sentinel (negative outflow, zero inflows), or the
-                true IRR is below the -0.999 floor.
-        10.0  — the true IRR exceeds the 1000% cap.
-        NaN   — no sign change, or brentq failed to converge.
+        -1.0   — total-loss sentinel (negative outflow, zero inflows).
+        -0.999 — the true IRR is below the bracket floor; the floor is reported.
+        10.0   — the true IRR exceeds the 1000% cap.
+        NaN    — no sign change, or brentq failed to converge.
     """
     has_negative = np.any(cashflows < 0.0)
     has_positive = np.any(cashflows > 0.0)
@@ -101,13 +101,15 @@ def _irr_single(cashflows: np.ndarray) -> float:
 
     if npv_lo * npv_hi > 0.0:
         # NPV has the same sign at both ends, so the root lies outside the
-        # bracket rather than being undefined. NPV is decreasing in r for a
-        # conventional cashflow, so the sign tells us which side it fell off:
-        #   both positive → the return exceeds _R_HI  → report the cap
-        #   both negative → the return is below _R_LO → report the floor
-        # Returning NaN here would send the path through clean_irr's NaN branch
-        # and book a very high return as a total loss.
-        if npv_hi > 0.0:
+        # bracket rather than being undefined. Which side it fell off depends on
+        # NPV's direction in r: decreasing for an investment-shaped cashflow
+        # (outflow first), increasing for a borrowing-shaped one (inflow first).
+        # Read the direction off the endpoints instead of assuming a shape —
+        # hardcoding "decreasing" reports a borrowing path's +2900% cost of
+        # funds as the -0.999 floor. Returning NaN here would be worse still:
+        # clean_irr would book a very high return as a total loss.
+        decreasing = npv_lo > npv_hi
+        if (npv_hi > 0.0) == decreasing:
             return _R_HI
         return _R_LO
 
@@ -150,9 +152,10 @@ def batch_irr(
 
     Returns:
         irr_vector of shape (n_sims,). Sentinels:
-          -1.0  → total loss (no inflows), or IRR below the -0.999 floor
-          10.0  → IRR above the 1000% cap
-          NaN   → no sign change, or the bracket endpoints were not finite
+          -1.0   → total loss (no inflows)
+          -0.999 → true IRR below the bracket floor (the floor is reported)
+          10.0   → IRR above the 1000% cap
+          NaN    → no sign change, or the bracket endpoints were not finite
 
         If return_diagnostics=True, returns (irr_vector, IrrDiagnostics).
     """
@@ -189,9 +192,14 @@ def batch_irr(
         n_failures = int(np.sum(bad))
 
         # Root outside the bracket: report the bound it fell past, not NaN.
+        # Direction-aware, matching _irr_single: NPV decreasing in r means both
+        # endpoints positive puts the root above the cap; for an increasing NPV
+        # (borrowing-shaped path) the mapping flips.
         outside = (npv_lo * npv_hi > 0.0) & ~bad
-        vals[outside & (npv_hi > 0.0)] = _R_HI
-        vals[outside & (npv_hi <= 0.0)] = _R_LO
+        decreasing = npv_lo > npv_hi
+        above_cap = outside & ((npv_hi > 0.0) == decreasing)
+        vals[above_cap] = _R_HI
+        vals[outside & ~above_cap] = _R_LO
 
         bracketed = ~bad & ~outside
         if np.any(bracketed):

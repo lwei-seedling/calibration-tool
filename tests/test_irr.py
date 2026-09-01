@@ -96,6 +96,14 @@ class TestIrrSingle:
             r = _irr_single(cf)
         assert np.isfinite(r)
 
+    def test_borrowing_shaped_cashflow_reports_correct_bound(self):
+        # Inflow first, outflow later: NPV is INCREASING in r, so both endpoints
+        # negative means the root is ABOVE the cap (true IRR here is +2900%).
+        # A hardcoded "NPV is decreasing" assumption reported this at -0.999.
+        cf = np.array([1.0, -30.0])
+        assert _irr_single(cf) == pytest.approx(10.0)
+        assert batch_irr(cf.reshape(1, -1))[0] == pytest.approx(10.0)
+
     def test_irr_below_bracket_reports_floor_without_warning(self):
         # Invest 1, get 0.0001 back after 1 year → IRR ≈ -99.99%, below _R_LO.
         # NPV is negative at both endpoints, so the root lies below the bracket:

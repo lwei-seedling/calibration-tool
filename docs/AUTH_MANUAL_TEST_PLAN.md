@@ -213,12 +213,30 @@ divergence)
 
 ---
 
-## 11. Deployment checklist (Streamlit Cloud)
+## 11. Fail-closed override (`CALIBRATION_REQUIRE_AUTH`)
+
+**Goal:** confirm a deployment that requires auth denies access when secrets
+are missing or unreadable, instead of silently opening up.
+
+| Step | Expected result |
+|---|---|
+| Remove/rename `.streamlit/secrets.toml`, set `CALIBRATION_REQUIRE_AUTH=1`, `streamlit run app.py` | Error: "Auth is required for this deployment but no [auth] section could be read from secrets. Access denied." No page content renders |
+| Unset `CALIBRATION_REQUIRE_AUTH` (or set `0`), same missing secrets | App loads directly with no login form (test 1 behaviour) |
+| Restore a valid `[auth]` block, keep `CALIBRATION_REQUIRE_AUTH=1` | Normal password gate (tests 3–7 behaviour) |
+
+Record result: ☐ Pass ☐ Fail
+
+---
+
+## 12. Deployment checklist (Streamlit Cloud)
 
 Before sharing the deployed URL externally:
 
 - [ ] `[auth]` block is configured in the Streamlit Cloud *Secrets*
       dashboard (**not** committed to `git`)
+- [ ] `CALIBRATION_REQUIRE_AUTH=1` is set in the deployment environment so a
+      missing or unreadable secrets file fails closed rather than opening the
+      app
 - [ ] Plaintext password is shared via a password manager / 1Password link,
       not email or chat
 - [ ] `secrets.toml` on any self-hosted box is `chmod 600` and owned by the

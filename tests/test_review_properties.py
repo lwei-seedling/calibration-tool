@@ -204,6 +204,28 @@ def test_calibration_never_returns_a_vanishing_senior_tranche():
         ).calibrate()
 
 
+def test_senior_floor_check_holds_at_large_capital():
+    """The senior-notional floor comparison must not break on float rounding.
+
+    notional and floor are computed by different float expressions whose gap
+    scales with total_capital; an absolute epsilon made a feasible $5bn vehicle
+    report h(alpha_hi) = -1.0 and calibrate() falsely raise infeasible.
+    """
+    stack = CapitalStack(
+        total_capital=5e9,
+        grant_reserve=GrantReserve(0),
+        guarantee=Guarantee(0.0, CoverageType.PERCENTAGE),
+        senior_coupon=0.08, mezzanine_coupon=0.12,
+        mezzanine_fraction=0.13, lifetime_years=10,
+    )
+    cfg = CalibratorConfig(min_senior_fraction=0.07, investor_hurdle_irr=0.07)
+    cfs = np.tile(np.array([-5e9] + [1.6e9] * 10), (50, 1))
+    cal = CatalyticCalibrator(stack, cfs, cfg)
+    assert cal._h(cal._max_structural_alpha()) > -1.0
+    alpha = cal.calibrate()
+    assert cal._h(alpha) >= -1e-9
+
+
 def test_calibrated_alpha_is_actually_feasible():
     """The returned alpha must satisfy the constraints it was solved for."""
     cfs = _volatile_cashflows(level=2_400_000)

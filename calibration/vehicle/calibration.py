@@ -98,7 +98,11 @@ class CatalyticCalibrator:
         floor = cfg.min_senior_fraction * self.capital_stack.total_capital
         # Strictly below, so that alpha exactly at _max_structural_alpha() — where
         # the senior tranche sits precisely on the floor — is still evaluated.
-        if "senior" not in results or results["senior"].notional < floor - 1e-9:
+        # The tolerance must scale with capital: notional and floor are computed
+        # by different float expressions, and their rounding gap grows with
+        # total_capital, exceeding any absolute epsilon from ~$1e9 up.
+        tol = max(1e-9, 1e-9 * self.capital_stack.total_capital)
+        if "senior" not in results or results["senior"].notional < floor - tol:
             return -1.0
 
         senior = results["senior"]
@@ -245,20 +249,23 @@ class CatalyticCalibrator:
                 "capital. Reduce mezzanine_fraction or min_senior_fraction."
             )
 
-        # Quick feasibility check at boundaries
-        if self._h(alpha_lo) >= 0:
+        # One probe pass serves three purposes: its endpoints are the boundary
+        # feasibility checks, its shape is the monotonicity test, and its values
+        # seed the root bracket. Each h evaluation runs the full waterfall and
+        # batch IRR over every path, so nothing here is evaluated twice.
+        is_monotone, alphas, values = self._probe(alpha_lo, alpha_hi)
+
+        if values[0] >= 0:
             # Already feasible with no catalytic capital at all.
             return alpha_lo
 
-        if self._h(alpha_hi) < 0:
+        if values[-1] < 0:
             raise ValueError(
                 f"Constraints infeasible even at alpha={alpha_hi:.4f} (the largest "
                 "catalytic fraction that still leaves a meaningful senior tranche). "
                 "Consider relaxing hurdle IRR or max_loss_probability, or adding "
                 "protective mitigants."
             )
-
-        is_monotone, alphas, values = self._probe(alpha_lo, alpha_hi)
 
         if is_monotone:
             lo, hi = self._bracket_from_probe(alphas, values, (alpha_lo, alpha_hi))
