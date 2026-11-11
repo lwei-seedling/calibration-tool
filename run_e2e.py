@@ -65,6 +65,12 @@ def print_results(result: PortfolioResult, inputs: PortfolioInputs, vehicle_name
     total_deployed = total_catalytic + total_commercial
     ref = max(total_deployed, 1.0)
     print(f"  Solver status          : {result.status}")
+    if result.infeasible_vehicles:
+        bad = ", ".join(vehicle_names[v] for v in result.infeasible_vehicles)
+        print(f"  !! INFEASIBLE VEHICLES : {bad}")
+        print("     No alpha meets the investor constraints; alpha shown is a placeholder.")
+    elif result.status not in ("optimal", "optimal_inaccurate"):
+        print("  !! LP DID NOT SOLVE    : allocations below are zero, not a recommendation.")
     print(f"  Total budget           : ${inputs.total_budget:>12,.0f}")
     print(f"  Total deployed capital : ${total_deployed:>12,.0f}")
     print(f"  Total catalytic capital: ${total_catalytic:>12,.0f}  ({total_catalytic/ref:.1%} of deployed)")

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import io
-import os
 import tempfile
 import warnings
 from pathlib import Path
@@ -20,12 +19,6 @@ from calibration.vehicle.calibration import CalibratorConfig
 from calibration.vehicle.models import VehicleInputs
 
 from auth import check_auth, logout
-
-try:
-    import openai as _openai_mod  # noqa: F401
-    _OPENAI_AVAILABLE = True
-except ImportError:
-    _OPENAI_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -671,6 +664,20 @@ def page_results() -> None:
     ch.subheader(f"{icon} {result.status.title()}  ·  seed {inputs.seed}")
     ce.download_button("Export CSV", _export_csv(result, names),
                        "results.csv", "text/csv")
+    if result.infeasible_vehicles:
+        bad = ", ".join(names[v] for v in result.infeasible_vehicles)
+        st.error(
+            f"**Calibration infeasible for: {bad}.** No amount of catalytic capital "
+            "meets the hurdle IRR and loss-probability targets for these vehicles. "
+            "Their α is a placeholder, not a result — do not report it. Relax the "
+            "targets or strengthen the guarantee / grant reserve and re-run."
+        )
+    elif result.status not in ("optimal", "optimal_inaccurate"):
+        st.error(
+            f"**Portfolio allocation did not solve (status: {result.status}).** "
+            "Allocations are shown as zero. Check the catalytic budget, CVaR limit "
+            "and minimum deployment settings."
+        )
 
     total_cat = sum(result.catalytic_allocations.values())
     total_dep = sum(result.allocations.values())
@@ -962,106 +969,6 @@ same columns and the same price-simulation math. The label is for your reference
 
 
 # ---------------------------------------------------------------------------
-# Code Review page
-# ---------------------------------------------------------------------------
-
-def page_code_review() -> None:
-    st.header("AI Code Review")
-    st.markdown(
-        "Uses the OpenAI API to review the calibration tool's core source files "
-        "for mathematical errors, edge cases, and numerical stability issues — "
-        "a second model's perspective on the implementation."
-    )
-
-    try:
-        from calibration.plugins.openai_codex import CodexReviewer  # noqa: PLC0415
-    except ImportError:
-        st.error(
-            "The `openai` package is not installed. "
-            "Run: `pip install -e \".[codex]\"` (from repo root) or `pip install openai`."
-        )
-        return
-
-    with st.form("codex_form"):
-        try:
-            _default_key = st.secrets.get("OPENAI_API_KEY", "")
-        except Exception:
-            _default_key = ""
-        _default_key = _default_key or os.environ.get("OPENAI_API_KEY", "")
-        api_key = st.text_input(
-            "OpenAI API Key",
-            type="password",
-            value=_default_key,
-            help="Or set OPENAI_API_KEY in the environment / Streamlit Cloud secrets.",
-        )
-        model = st.selectbox("Model", ["gpt-4o", "gpt-4-turbo", "gpt-4"], index=0)
-        files_to_review = st.multiselect(
-            "Files to review",
-            options=CodexReviewer.DEFAULT_FILES,
-            default=CodexReviewer.DEFAULT_FILES,
-        )
-        submitted = st.form_submit_button("Run Code Review", type="primary")
-
-    if not submitted:
-        return
-
-    if not api_key:
-        st.error("An OpenAI API key is required.")
-        return
-
-    if not files_to_review:
-        st.warning("No files selected.")
-        return
-
-    with st.spinner(f"Reviewing {len(files_to_review)} file(s) via OpenAI API…"):
-        try:
-            reviewer = CodexReviewer(model=model, files=files_to_review, api_key=api_key)
-            result = reviewer.review()
-        except RuntimeError as exc:
-            st.error(str(exc))
-            return
-
-    criticals = [f for f in result.findings if f.severity == "critical"]
-    warnings_  = [f for f in result.findings if f.severity == "warning"]
-    infos      = [f for f in result.findings if f.severity == "info"]
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Files reviewed", len(result.files_reviewed))
-    c2.metric("Critical", len(criticals))
-    c3.metric("Warnings", len(warnings_))
-    c4.metric("Info", len(infos))
-
-    if result.errors:
-        with st.expander(f"Errors ({len(result.errors)})", expanded=False):
-            for err in result.errors:
-                st.warning(err)
-
-    if not result.findings:
-        st.success("No issues found.")
-        return
-
-    for label, group, color in (
-        ("Critical", criticals, "red"),
-        ("Warnings", warnings_, "orange"),
-        ("Info", infos, "blue"),
-    ):
-        if not group:
-            continue
-        with st.expander(f"{label} ({len(group)})", expanded=(label == "Critical")):
-            for finding in group:
-                hint = f" — line {finding.line_hint}" if finding.line_hint else ""
-                st.markdown(
-                    f"**`{finding.file}`{hint}** `[{finding.category}]`\n\n"
-                    f"{finding.description}"
-                )
-                st.divider()
-
-    st.caption(
-        f"Model: {result.model_used}  |  Tokens used: {result.total_tokens_used:,}"
-    )
-
-
-# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -1084,9 +991,6 @@ def main() -> None:
             "Sensitivity": "🔬  Sensitivity",
             "How It Works": "ℹ️  How It Works",
         }
-        if _OPENAI_AVAILABLE:
-            _pages.append("Code Review")
-            _page_labels["Code Review"] = "🤖  Code Review"
         page = st.radio("Navigate", _pages, format_func=lambda p: _page_labels[p])
         st.divider()
         st.subheader("Run Settings")
@@ -1113,8 +1017,6 @@ def main() -> None:
         page_results()
     elif page == "Sensitivity":
         page_sensitivity()
-    elif page == "Code Review":
-        page_code_review()
     else:
         page_how_it_works()
 

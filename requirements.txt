@@ -10,6 +10,3 @@ openpyxl>=3.1
 # Streamlit UI
 streamlit>=1.32
 plotly>=5.18
-
-# Optional: uncomment to enable the AI Code Review page
-# openai>=1.0

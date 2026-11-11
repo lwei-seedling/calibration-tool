@@ -9,6 +9,13 @@ The system models the full hierarchy: **PROJECT → VEHICLE → PORTFOLIO**.
 - **Portfolio optimisation** allocates capital across vehicles via a CVaR-constrained LP.
 - **Catalytic capital is never an input** — it is always a solved output.
 
+> **Disclaimer — illustrative model, not investment advice.** This is a
+> simplified reference implementation for exploring blended-finance structures.
+> It is not investment, legal, or financial advice, and its outputs must not be
+> the sole basis for any capital commitment. All bundled sample data is
+> synthetic. See [Model limitations](#model-limitations) and [LICENSE](LICENSE)
+> (Apache-2.0, provided "as is" without warranty).
+
 ---
 
 ## Key Concepts
@@ -781,80 +788,29 @@ The script prints a structured report with pass/fail for 18 checks:
 
 ---
 
-## Developer Tools — AI Code Review Plugin
+## Model limitations
 
-Uses the OpenAI API (GPT-4o or GPT-4 Turbo) to review the calibration tool's
-core financial source files for mathematical errors, numerical stability issues,
-edge cases, and logic errors — a second model's perspective on the implementation.
+Read these before relying on any number the tool produces:
 
-### Setup
-
-```bash
-# From the repo root (editable install — recommended):
-pip install -e ".[codex]"
-
-# Or install openai directly:
-pip install openai
-
-export OPENAI_API_KEY=sk-...
-```
-
-> **Note:** Code Review is a developer/internal tool. The nav item is hidden
-> automatically when `openai` is not installed, so it will not appear in
-> public demos deployed without the optional dependency.
-
-### CLI usage
-
-```bash
-# Full review, text report (default):
-python run_codex_review.py
-
-# Specific files only:
-python run_codex_review.py --files calibration/vehicle/calibration.py calibration/utils/irr.py
-
-# Choose model:
-python run_codex_review.py --model gpt-4-turbo
-
-# Machine-readable output:
-python run_codex_review.py --output-format json
-python run_codex_review.py --output-format markdown > review.md
-```
-
-Exit codes: `0` = completed (findings are normal), `1` = missing key/package, `2` = all API calls failed.
-
-### Python API
-
-```python
-from calibration.plugins.openai_codex import CodexReviewer
-
-result = CodexReviewer(model="gpt-4o").review()
-
-for f in result.findings:
-    print(f"{f.severity:10s}  {f.file}  [{f.category}]  {f.description}")
-
-print(f"\n{len(result.findings)} findings across {len(result.files_reviewed)} files")
-print(f"Tokens used: {result.total_tokens_used:,}")
-```
-
-### Streamlit
-
-Visit the **🤖 Code Review** page (5th item in the sidebar navigation).
-Enter your OpenAI API key in the form (or pre-set `OPENAI_API_KEY` in the environment
-or in the Streamlit Cloud secrets dashboard — see [Deployment](#streamlit-cloud-deployment)).
-
-### What it reviews
-
-The plugin sends each of these files to the API in a separate call:
-
-| File | Focus areas |
-|------|-------------|
-| `calibration/project/simulation.py` | GBM drift/variance correction, shock application |
-| `calibration/vehicle/calibration.py` | Brent's method bracketing, monotonicity probe |
-| `calibration/vehicle/capital_stack.py` | Waterfall arithmetic, loss allocation ordering |
-| `calibration/vehicle/risk_mitigants.py` | Guarantee absorption logic, reserve depletion |
-| `calibration/portfolio/optimizer.py` | Rockafellar-Uryasev CVaR LP formulation |
-| `calibration/utils/irr.py` | IRR bracket logic, sentinel handling |
-| `calibration/utils/stats.py` | Cholesky decomposition, CVaR formula |
+- **Price risk only (CSV formats).** Revenue is shocked by a GBM price path;
+  yield, cost overrun, delay, FX and counterparty risk are not modelled unless
+  you use the parametric format.
+- **Bullet maturity.** Senior and mezzanine principal is repaid entirely at the
+  final period; there is no amortisation, refinancing, or reserve account.
+- **Two waterfall bases.** Loss probability comes from a terminal NPV loss
+  waterfall; IRR comes from a per-period cashflow waterfall. The guarantee
+  reduces senior loss probability but does not add cash to senior IRR.
+- **Correlation is approximate.** Projects are correlated by rank-reordering
+  lifetime cashflow totals (Iman-Conover style), not by correlating the
+  underlying risk drivers. Vehicles are treated as independent of each other.
+- **Monte Carlo noise.** At 100–2,000 paths, tail metrics (CVaR, loss
+  probability near the threshold) move with the seed. Re-run with several seeds
+  before quoting a figure.
+- **Infeasible results are flagged, not solved.** If no catalytic fraction
+  meets the investor constraints, the vehicle is listed in
+  `PortfolioResult.infeasible_vehicles` and `status` is
+  `calibration_infeasible`; its reported α is a placeholder. If the portfolio
+  LP fails, allocations are returned as zero.
 
 ---
 
@@ -952,12 +908,8 @@ pip install -r requirements.txt   # verified list of all UI dependencies
 ```toml
 [auth]
 password_hash = "pbkdf2_sha256$390000$...$..."   # generate via python auth.py
-
-# Optional — enables the Code Review page
-OPENAI_API_KEY = "sk-..."
 ```
 
-If `OPENAI_API_KEY` is set, also add `openai>=1.0` to `requirements.txt` before deploying.
 Omit the `[auth]` section entirely for an open demo (not recommended for sensitive data).
 
 **4. Share the deployed URL.** Users can upload CSVs, run calibration, explore results,

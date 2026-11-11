@@ -65,4 +65,9 @@ class PortfolioResult:
     portfolio_irr_distribution: np.ndarray   # shape (n_sims,); portfolio-level IRR
     portfolio_loss_distribution: np.ndarray  # shape (n_sims,); portfolio-level loss rate
     cvar_95: float
-    status: str  # 'optimal', 'infeasible', 'unbounded', etc.
+    # LP solver status ('optimal', 'infeasible', ...) or 'calibration_infeasible'
+    # when any vehicle could not meet investor constraints at any alpha.
+    status: str
+    # Indices of vehicles whose calibration was infeasible. Their alpha is a
+    # placeholder (alpha_hi), not a calibrated value — do not report it.
+    infeasible_vehicles: list[int] = field(default_factory=list)

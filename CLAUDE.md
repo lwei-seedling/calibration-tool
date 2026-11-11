@@ -54,10 +54,8 @@ calibration/
 │   ├── irr.py         # batch_irr(), clean_irr() with edge-case sentinels
 │   ├── stats.py       # var(), cvar(), cholesky_correlated_draws()
 │   └── loaders.py     # load_project_from_excel(), load_price_series()
-└── plugins/           # Optional integrations (not required for core functionality)
-    └── openai_codex.py  # CodexReviewer: GPT-4 code review (requires openai extra)
 
-app.py                 # Streamlit web demo (5 pages: Setup, Results, Sensitivity, How It Works, Code Review)
+app.py                 # Streamlit web demo (4 pages: Setup, Results, Sensitivity, How It Works)
 auth.py                # Password gate for app.py: PBKDF2-SHA256 hashes, session lockout
 examples/
 └── ui_sample/         # Format 2 CSV sample data for the Streamlit demo
@@ -232,7 +230,6 @@ pytest --cov=calibration --cov-report=term-missing
 pytest tests/test_project.py -v
 pytest tests/test_vehicle.py -v
 pytest tests/test_portfolio.py -v
-pytest tests/test_codex_plugin.py -v   # requires: pip install -e ".[codex]"
 ```
 
 All tests should pass. A warning about negative NPV on a stress-test project is expected.
@@ -250,25 +247,6 @@ python run_e2e.py --sims 5000 --seed 42
 ```
 
 See `README.md` for CSV/JSON format specifications.
-
----
-
-## Plugins (Optional)
-
-### AI Code Review (`calibration/plugins/openai_codex.py`)
-
-Requires `pip install -e ".[codex]"` (or `pip install openai`) and `OPENAI_API_KEY`.
-
-```bash
-python run_codex_review.py          # text report (default)
-python run_codex_review.py --output-format markdown > review.md
-python run_codex_review.py --model gpt-4-turbo
-```
-
-See `README.md` "Developer Tools" section for full CLI/API documentation.
-
-In the Streamlit UI, the "🤖 Code Review" nav item is auto-hidden when `openai`
-is not installed, so it does not appear in public demos.
 
 ---
 
@@ -309,6 +287,10 @@ Post-simulation correlation is applied at project aggregation (vehicle level).
 Rank-based reordering (Iman-Conover style) reorders each project's simulation
 paths to match a target Cholesky-decomposed correlation structure. The
 `corr_matrix` in `VehicleInputs` is a J×J project-level correlation matrix.
+
+The reorder sorts each project's paths by lifetime total and places the k-th
+smallest at the simulation index whose correlated draw has rank k
+(`tests/test_portfolio.py::TestCorrelation` guards this).
 
 **Note:** This is an approximation — it correlates total lifetime cashflow
 rankings, not the underlying stochastic drivers. A future extension would
@@ -415,7 +397,9 @@ minimise weighted-average catalytic fraction.
   If your project has back-loaded revenue, this works naturally. Otherwise, increase
   `total_capital / T * multiplier` to ensure terminal cash is sufficient.
 
-- **Infeasible calibration**: if `CatalyticCalibrator` raises `ValueError: Constraints infeasible`,
+- **Infeasible calibration**: `CatalyticCalibrator` raises `ValueError: Constraints infeasible`.
+  `PortfolioOptimizer` catches it, lists the vehicle in `PortfolioResult.infeasible_vehicles`
+  and sets `status="calibration_infeasible"` (alpha is a placeholder, never a result). To fix,
   either (a) relax `investor_hurdle_irr` / `max_loss_probability` in `CalibratorConfig`,
   or (b) add more protective mitigants (higher `guarantee_coverage` or `grant_reserve`).
 

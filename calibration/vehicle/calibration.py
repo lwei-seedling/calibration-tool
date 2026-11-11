@@ -58,6 +58,11 @@ class CatalyticCalibrator:
         self.capital_stack = capital_stack
         self.vehicle_cashflows = vehicle_cashflows
         self.config = config or CalibratorConfig()
+        # Largest alpha that still leaves a senior tranche. Beyond this the
+        # vehicle has no commercial senior capital, so "meeting senior
+        # constraints" is meaningless and must not count as feasible.
+        mezz = float(getattr(capital_stack, "mezzanine_fraction", 0.0))
+        self._alpha_hi = min(self.config.alpha_hi, 1.0 - mezz - 1e-3)
 
     def _h(self, alpha: float) -> float:
         """Objective function: negative when infeasible, non-negative when feasible.
@@ -81,8 +86,9 @@ class CatalyticCalibrator:
         results = self.capital_stack.waterfall(self.vehicle_cashflows, alpha)
 
         if "senior" not in results:
-            # Degenerate: no senior tranche (alpha ≈ 1.0)
-            return 1.0
+            # Degenerate: no senior tranche left to protect. Infeasible by
+            # definition — there is no commercial capital being mobilised.
+            return -1.0
 
         senior = results["senior"]
         g1 = float(np.nanmedian(senior.irr_distribution)) - cfg.investor_hurdle_irr
@@ -92,7 +98,7 @@ class CatalyticCalibrator:
     def _check_monotonicity(self) -> bool:
         """Evaluate h at N evenly-spaced alpha points and verify non-decreasing."""
         cfg = self.config
-        alphas = np.linspace(cfg.alpha_lo, cfg.alpha_hi, cfg.monotonicity_n_check)
+        alphas = np.linspace(cfg.alpha_lo, self._alpha_hi, cfg.monotonicity_n_check)
         values = np.array([self._h(a) for a in alphas])
 
         # Check that values are non-decreasing within epsilon tolerance
@@ -121,7 +127,7 @@ class CatalyticCalibrator:
         cfg = self.config
 
         # Phase 1: coarse grid
-        coarse_alphas = np.linspace(cfg.alpha_lo, cfg.alpha_hi, cfg.grid_n_coarse)
+        coarse_alphas = np.linspace(cfg.alpha_lo, self._alpha_hi, cfg.grid_n_coarse)
         coarse_values = np.array([self._h(a) for a in coarse_alphas])
         feasible_mask = coarse_values >= 0
 
@@ -134,7 +140,7 @@ class CatalyticCalibrator:
         alpha_coarse = float(coarse_alphas[np.where(feasible_mask)[0][0]])
 
         # Phase 2: fine grid around alpha_coarse
-        step = (cfg.alpha_hi - cfg.alpha_lo) / cfg.grid_n_coarse
+        step = (self._alpha_hi - cfg.alpha_lo) / cfg.grid_n_coarse
         fine_lo = max(cfg.alpha_lo, alpha_coarse - 2 * step)
         fine_alphas = np.linspace(fine_lo, alpha_coarse, cfg.grid_n_fine)
         fine_values = np.array([self._h(a) for a in fine_alphas])
@@ -159,11 +165,16 @@ class CatalyticCalibrator:
 
         # Quick feasibility check at boundaries
         h_lo = self._h(cfg.alpha_lo)
-        h_hi = self._h(cfg.alpha_hi)
+        alpha_hi = self._alpha_hi
+        if alpha_hi <= cfg.alpha_lo:
+            raise ValueError(
+                "Constraints infeasible: no alpha in the search range leaves a senior tranche."
+            )
+        h_hi = self._h(alpha_hi)
 
         if h_hi < 0:
             raise ValueError(
-                f"Constraints infeasible even at alpha={cfg.alpha_hi}. "
+                f"Constraints infeasible even at alpha={alpha_hi:.3f}. "
                 "Consider relaxing hurdle IRR or max_loss_probability."
             )
 
@@ -179,7 +190,7 @@ class CatalyticCalibrator:
                 alpha_star = brentq(
                     self._h,
                     cfg.alpha_lo,
-                    cfg.alpha_hi,
+                    alpha_hi,
                     xtol=cfg.brentq_xtol,
                     rtol=cfg.brentq_xtol,
                 )

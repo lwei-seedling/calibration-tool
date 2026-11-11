@@ -90,19 +90,17 @@ class PortfolioOptimizer:
         # Generate J-dimensional correlated draws (n_sims, J)
         corr_draws = cholesky_correlated_draws(n_sims, corr, rng)  # (n_sims, J)
 
-        # Apply correlation adjustment: replace project returns with correlated ordering.
-        # Method: rank-based reordering (Iman-Conover style). For each project j,
-        # reorder its simulation paths to match the rank ordering from corr_draws[:, j].
+        # Apply correlation adjustment via rank-based reordering (Iman-Conover
+        # style). For each project j: sort its paths by total lifetime cashflow,
+        # then place the k-th smallest path at the simulation index whose
+        # correlated draw has rank k. Marginal distributions are unchanged; the
+        # rank correlation of project totals matches that of corr_draws.
         correlated_cfs = []
         for j in range(J):
             cfs = project_cashflows[j]  # (n_sims, T+1)
-            target_ranks = np.argsort(np.argsort(corr_draws[:, j]))  # rank of each path
-            source_ranks = np.argsort(np.argsort(cfs.sum(axis=1)))   # rank by total CF
-            # Reorder: path with rank k in source gets the position of rank k in target
-            reorder_idx = np.empty(n_sims, dtype=int)
-            reorder_idx[target_ranks] = np.arange(n_sims)
-            cfs_reordered = cfs[reorder_idx]
-            correlated_cfs.append(cfs_reordered)
+            target_ranks = np.argsort(np.argsort(corr_draws[:, j]))  # rank of each sim index
+            sorted_by_total = np.argsort(cfs.sum(axis=1), kind="stable")  # path indices, ascending total CF
+            correlated_cfs.append(cfs[sorted_by_total[target_ranks]])
 
         # Sum across projects → vehicle cashflows
         vehicle_cashflows = np.sum(correlated_cfs, axis=0)  # (n_sims, T+1)
@@ -133,7 +131,13 @@ class PortfolioOptimizer:
         self,
         vehicle_idx: int,
         vehicle_cashflows: np.ndarray,
-    ) -> float:
+    ) -> tuple[float, bool]:
+        """Return (alpha, feasible).
+
+        If no alpha in the search range satisfies the investor constraints,
+        returns (alpha_hi, False). The caller records the vehicle as infeasible
+        so the result is never mistaken for a genuine calibration.
+        """
         capital_stack = self._build_capital_stack(vehicle_idx)
         calibrator = CatalyticCalibrator(
             capital_stack=capital_stack,
@@ -141,15 +145,17 @@ class PortfolioOptimizer:
             config=self.inputs.calibrator_config,
         )
         try:
-            return calibrator.calibrate()
+            return calibrator.calibrate(), True
         except ValueError as exc:
+            alpha_hi = self.inputs.calibrator_config.alpha_hi
             warnings.warn(
-                f"Vehicle {vehicle_idx} calibration failed: {exc}. "
-                "Using alpha=0.99 as fallback.",
+                f"Vehicle {vehicle_idx} calibration is INFEASIBLE: {exc} "
+                f"Reporting alpha={alpha_hi} as a placeholder; the vehicle is "
+                "listed in PortfolioResult.infeasible_vehicles.",
                 RuntimeWarning,
                 stacklevel=3,
             )
-            return 0.99
+            return alpha_hi, False
 
     # ------------------------------------------------------------------
     # Step 3: Extract per-vehicle loss and return distributions
@@ -269,13 +275,21 @@ class PortfolioOptimizer:
                 problem.solve(solver=solver, verbose=False)
                 if problem.status in [cp.OPTIMAL, cp.OPTIMAL_INACCURATE]:
                     break
-            except Exception:
+            except cp.error.SolverError:
                 continue
 
-        if w.value is None:
-            return np.full(N_v, B / N_v), problem.status or "failed"
+        if w.value is None or problem.status not in [cp.OPTIMAL, cp.OPTIMAL_INACCURATE]:
+            # No valid allocation exists. Return zeros rather than inventing
+            # one, so a failed solve can never be read as a recommendation.
+            status = problem.status or "solver_failed"
+            warnings.warn(
+                f"Portfolio LP did not solve (status={status}); returning zero allocations.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+            return np.zeros(N_v), status
 
-        return np.maximum(0.0, w.value), problem.status or "optimal"
+        return np.maximum(0.0, w.value), problem.status
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -292,10 +306,13 @@ class PortfolioOptimizer:
         all_alphas: list[float] = []
         all_loss_rates: list[np.ndarray] = []
         all_return_rates: list[np.ndarray] = []
+        infeasible_vehicles: list[int] = []
 
         for v_idx in range(N_v):
             vehicle_cfs = self._simulate_vehicle(v_idx, seed_offset=v_idx)
-            alpha = self._calibrate_vehicle(v_idx, vehicle_cfs)
+            alpha, feasible = self._calibrate_vehicle(v_idx, vehicle_cfs)
+            if not feasible:
+                infeasible_vehicles.append(v_idx)
             loss_rate, return_rate = self._vehicle_distributions(v_idx, vehicle_cfs, alpha)
 
             all_vehicle_cashflows.append(vehicle_cfs)
@@ -346,5 +363,6 @@ class PortfolioOptimizer:
             portfolio_irr_distribution=portfolio_return_paths,
             portfolio_loss_distribution=portfolio_loss_paths,
             cvar_95=portfolio_cvar,
-            status=status,
+            status="calibration_infeasible" if infeasible_vehicles else status,
+            infeasible_vehicles=infeasible_vehicles,
         )
