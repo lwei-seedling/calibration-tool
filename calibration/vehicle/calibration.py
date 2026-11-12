@@ -10,6 +10,12 @@ from scipy.optimize import brentq
 from calibration.vehicle.capital_stack import CapitalStack
 
 
+# Numerical tolerance on the IRR test. Senior IRR is capped at its coupon, and
+# IRR solvers return e.g. 0.07999999999 for an 8% coupon, so without this a
+# hurdle equal to the coupon would be reported as infeasible at every alpha.
+_IRR_TOL = 1e-6
+
+
 class CalibratorConfig(BaseModel):
     """Configuration for the catalytic calibration algorithm."""
 
@@ -91,7 +97,7 @@ class CatalyticCalibrator:
             return -1.0
 
         senior = results["senior"]
-        g1 = float(np.nanmedian(senior.irr_distribution)) - cfg.investor_hurdle_irr
+        g1 = float(np.nanmedian(senior.irr_distribution)) - cfg.investor_hurdle_irr + _IRR_TOL
         g2 = cfg.max_loss_probability - senior.loss_probability
         return min(g1, g2)
 

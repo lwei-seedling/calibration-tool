@@ -214,3 +214,22 @@ class TestCalibration:
         calibrator = CatalyticCalibrator(stack, cfs, cfg)
         with pytest.raises(ValueError, match="infeasible"):
             calibrator.calibrate()
+
+
+def test_hurdle_equal_to_senior_coupon_is_feasible():
+    """Senior IRR is capped at its coupon; a hurdle equal to the coupon must be
+    reachable, not lost to floating-point noise (IRR solver returns 0.0799999...)."""
+    import numpy as np
+    from calibration.vehicle.calibration import CalibratorConfig, CatalyticCalibrator
+    from calibration.vehicle.capital_stack import CapitalStack
+    from calibration.vehicle.risk_mitigants import Guarantee, GrantReserve
+
+    # Very profitable, riskless vehicle: senior is always paid in full.
+    cfs = np.tile([-1_000_000.0] + [2_000_000.0] * 10, (200, 1))
+    stack = CapitalStack(
+        total_capital=1_000_000, grant_reserve=GrantReserve(0.0),
+        guarantee=Guarantee(0.0), senior_coupon=0.08, mezzanine_coupon=0.12,
+        mezzanine_fraction=0.10, lifetime_years=10,
+    )
+    cfg = CalibratorConfig(investor_hurdle_irr=0.08, max_loss_probability=0.05)
+    assert CatalyticCalibrator(stack, cfs, cfg).calibrate() == 0.0
