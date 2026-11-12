@@ -197,6 +197,7 @@ class PortfolioOptimizer:
         loss_rates: list[np.ndarray],
         return_rates: list[np.ndarray],
         vehicle_capacities: np.ndarray,
+        excluded: list[int] | None = None,
     ) -> tuple[np.ndarray, str]:
         """Solve the portfolio allocation LP.
 
@@ -205,10 +206,14 @@ class PortfolioOptimizer:
           zeta: scalar VaR threshold
           u: (S,) excess loss auxiliary variables
 
+        Vehicles in ``excluded`` (calibration infeasible) are forced to w_v = 0,
+        so a placeholder alpha can never attract capital or dilute portfolio risk.
+
         Returns:
             (w_optimal, status)
         """
         cfg = self.inputs
+        excluded = excluded or []
         N_v = len(cfg.vehicles)
         S = cfg.n_sims
         B = cfg.total_budget
@@ -220,7 +225,12 @@ class PortfolioOptimizer:
         u = cp.Variable(S, nonneg=True, name="u")
 
         # c_v: catalytic fraction per vehicle
-        c = np.array(catalytic_fractions)
+        # Excluded vehicles carry a NaN alpha; any finite value works because w_v = 0.
+        c = np.nan_to_num(np.array(catalytic_fractions, dtype=float), nan=1.0)
+        lower = np.full(N_v, cfg.min_allocation, dtype=float)
+        upper = np.asarray(vehicle_capacities, dtype=float).copy()
+        lower[excluded] = 0.0
+        upper[excluded] = 0.0
 
         # l_vs: loss rate matrix (N_v, S)
         L = np.stack(loss_rates, axis=0)  # (N_v, S)
@@ -233,9 +243,10 @@ class PortfolioOptimizer:
 
         constraints = [
             # Per-vehicle minimum allocation
-            w >= cfg.min_allocation,
-            # Per-vehicle capacity (natural upper bound from vehicle total_capital)
-            w <= vehicle_capacities,
+            w >= lower,
+            # Per-vehicle capacity (natural upper bound from vehicle total_capital);
+            # zero for calibration-infeasible vehicles.
+            w <= upper,
         ]
 
         if cfg.catalytic_budget is not None:
@@ -316,20 +327,23 @@ class PortfolioOptimizer:
             loss_rate, return_rate = self._vehicle_distributions(v_idx, vehicle_cfs, alpha)
 
             all_vehicle_cashflows.append(vehicle_cfs)
-            all_alphas.append(alpha)
+            all_alphas.append(alpha if feasible else float("nan"))
             all_loss_rates.append(loss_rate)
             all_return_rates.append(return_rate)
 
         # Solve allocation LP
         vehicle_capacities = np.array([v.total_capital for v in inputs.vehicles])
         w_opt, status = self._solve_lp(
-            all_alphas, all_loss_rates, all_return_rates, vehicle_capacities
+            all_alphas, all_loss_rates, all_return_rates, vehicle_capacities,
+            excluded=infeasible_vehicles,
         )
 
         # Build result
         allocations = {v: float(w_opt[v]) for v in range(N_v)}
-        catalytic_allocs = {v: float(w_opt[v] * all_alphas[v]) for v in range(N_v)}
-        commercial_allocs = {v: float(w_opt[v] * (1.0 - all_alphas[v])) for v in range(N_v)}
+        # Infeasible vehicles have w_v = 0 and NaN alpha; report zero dollars.
+        alpha_or_zero = [0.0 if np.isnan(a) else a for a in all_alphas]
+        catalytic_allocs = {v: float(w_opt[v] * alpha_or_zero[v]) for v in range(N_v)}
+        commercial_allocs = {v: float(w_opt[v] * (1.0 - alpha_or_zero[v])) for v in range(N_v)}
 
         total_catalytic = sum(catalytic_allocs.values())
         total_commercial = sum(commercial_allocs.values())
@@ -338,7 +352,8 @@ class PortfolioOptimizer:
         # Marginal catalytic efficiency per vehicle = (1-alpha)/alpha (leverage at min feasible alpha).
         # This is the commercial capital mobilized per unit of catalytic capital deployed.
         marginal_eff = {
-            v: (1.0 - all_alphas[v]) / max(all_alphas[v], 1e-9)
+            v: float("nan") if np.isnan(all_alphas[v])
+            else (1.0 - all_alphas[v]) / max(all_alphas[v], 1e-9)
             for v in range(N_v)
         }
 
@@ -364,5 +379,6 @@ class PortfolioOptimizer:
             portfolio_loss_distribution=portfolio_loss_paths,
             cvar_95=portfolio_cvar,
             status="calibration_infeasible" if infeasible_vehicles else status,
+            lp_status=status,
             infeasible_vehicles=infeasible_vehicles,
         )

@@ -59,15 +59,19 @@ class PortfolioResult:
     allocations: dict[int, float]            # vehicle index → capital allocation
     catalytic_allocations: dict[int, float]  # vehicle index → catalytic capital
     commercial_allocations: dict[int, float] # vehicle index → commercial capital
-    catalytic_fractions: dict[int, float]    # vehicle index → calibrated alpha*
+    catalytic_fractions: dict[int, float]    # vehicle index → calibrated alpha* (NaN if infeasible)
     leverage_ratio: float                    # total_commercial / total_catalytic
     marginal_catalytic_efficiency: dict[int, float]  # commercial per unit catalytic per vehicle
     portfolio_irr_distribution: np.ndarray   # shape (n_sims,); portfolio-level IRR
     portfolio_loss_distribution: np.ndarray  # shape (n_sims,); portfolio-level loss rate
     cvar_95: float
-    # LP solver status ('optimal', 'infeasible', ...) or 'calibration_infeasible'
-    # when any vehicle could not meet investor constraints at any alpha.
+    # 'calibration_infeasible' when any vehicle could not meet investor
+    # constraints at any alpha; otherwise the LP solver status.
     status: str
-    # Indices of vehicles whose calibration was infeasible. Their alpha is a
-    # placeholder (alpha_hi), not a calibrated value — do not report it.
+    # Raw LP solver status ('optimal', 'optimal_inaccurate', 'infeasible', ...),
+    # kept separately so an LP failure is never hidden by a calibration failure.
+    lp_status: str = ""
+    # Indices of vehicles whose calibration was infeasible. They are excluded
+    # from the LP (allocation 0) and their catalytic_fractions /
+    # marginal_catalytic_efficiency entries are NaN.
     infeasible_vehicles: list[int] = field(default_factory=list)

@@ -250,9 +250,24 @@ def chart_irr_histogram(irr_dist: np.ndarray) -> go.Figure:
     return fig
 
 
+def _alpha(result, i: int) -> float:
+    """Calibrated alpha for vehicle i, or NaN if its calibration was infeasible."""
+    return float(result.catalytic_fractions.get(i, float("nan")))
+
+
+def _fmt_alpha(result, i: int) -> str:
+    a = _alpha(result, i)
+    return "Infeasible" if np.isnan(a) else f"{a:.1%}"
+
+
+def _mean_feasible_alpha(result) -> float:
+    vals = [a for a in result.catalytic_fractions.values() if not np.isnan(a)]
+    return float(np.mean(vals)) if vals else float("nan")
+
+
 def chart_capital_stack(result, names: list[str]) -> go.Figure:
     idxs = sorted(result.allocations.keys())
-    order = sorted(idxs, key=lambda i: result.catalytic_fractions.get(i, 0), reverse=True)
+    order = sorted(idxs, key=lambda i: np.nan_to_num(_alpha(result, i), nan=-1.0), reverse=True)
     vnames = [names[i] for i in order]
     cat = [result.catalytic_allocations.get(i, 0) / 1e6 for i in order]
     com = [result.commercial_allocations.get(i, 0) / 1e6 for i in order]
@@ -272,7 +287,8 @@ def chart_capital_stack(result, names: list[str]) -> go.Figure:
 
 def chart_alpha(result, names: list[str]) -> go.Figure:
     idxs = sorted(result.allocations.keys())
-    alphas = [result.catalytic_fractions.get(i, 0) * 100 for i in idxs]
+    idxs = [i for i in idxs if not np.isnan(_alpha(result, i))]  # infeasible: no bar
+    alphas = [_alpha(result, i) * 100 for i in idxs]
     vnames = [names[i] for i in idxs]
     colors = ["#2E7D32" if a < 40 else "#F9A825" if a < 60 else "#C62828" for a in alphas]
     fig = go.Figure(go.Bar(x=vnames, y=alphas, marker_color=colors,
@@ -432,7 +448,7 @@ def _portfolio_commentary(result, inputs, names: list[str]) -> str:
         f"Across {n_active} active vehicle(s), **${total_cat/1e6:.1f}M of catalytic capital "
         f"mobilises ${total_com/1e6:.1f}M of commercial investment** (portfolio leverage: "
         f"**{lev:.1f}\u00d7**). "
-        f"All senior tranches were calibrated to a **{hurdle:.1%} IRR hurdle** over a "
+        f"{'Feasible' if result.infeasible_vehicles else 'All'} senior tranches were calibrated to a **{hurdle:.1%} IRR hurdle** over a "
         f"**{horizon}-year** investment horizon. "
         f"The blended portfolio CVaR\u2085 is **{cvar:.1%}** — the expected loss rate "
         f"in the worst 5% of simulated scenarios. {risk_note}"
@@ -441,8 +457,8 @@ def _portfolio_commentary(result, inputs, names: list[str]) -> str:
 
 def _sensitivity_commentary(base, mod, test_id: str, label: str) -> str:
     """Plain-language interpretation of a sensitivity result."""
-    base_alpha = float(np.mean(list(base.catalytic_fractions.values())))
-    mod_alpha  = float(np.mean(list(mod.catalytic_fractions.values())))
+    base_alpha = _mean_feasible_alpha(base)
+    mod_alpha  = _mean_feasible_alpha(mod)
     d_alpha = mod_alpha - base_alpha
     d_lev   = mod.leverage_ratio - base.leverage_ratio
     d_cvar  = mod.cvar_95 - base.cvar_95
@@ -488,6 +504,10 @@ def _sensitivity_commentary(base, mod, test_id: str, label: str) -> str:
         direction = "improves" if d_alpha <= 0 else "worsens"
         interp = f"**{label}** {direction} the capital efficiency of the portfolio."
 
+    n_new_bad = len(set(mod.infeasible_vehicles) - set(base.infeasible_vehicles))
+    if n_new_bad:
+        interp = (f"**{label}** pushes {n_new_bad} vehicle(s) into infeasibility — no "
+                  "amount of catalytic capital meets the investor targets. " + interp)
     return f"{interp}\n\n{alpha_note} {lev_note} {cvar_note}"
 
 
@@ -629,7 +649,8 @@ def _export_csv(result, names: list[str]) -> str:
                      "allocation_usd": result.allocations.get(i, 0),
                      "catalytic_usd": result.catalytic_allocations.get(i, 0),
                      "commercial_usd": result.commercial_allocations.get(i, 0),
-                     "alpha": result.catalytic_fractions.get(i, 0),
+                     "alpha": _fmt_alpha(result, i) if np.isnan(_alpha(result, i))
+                              else _alpha(result, i),
                      "leverage_x": result.marginal_catalytic_efficiency.get(i, 0)})
     rows.append({"vehicle": "PORTFOLIO",
                  "allocation_usd": sum(result.allocations.values()),
@@ -668,13 +689,13 @@ def page_results() -> None:
         bad = ", ".join(names[v] for v in result.infeasible_vehicles)
         st.error(
             f"**Calibration infeasible for: {bad}.** No amount of catalytic capital "
-            "meets the hurdle IRR and loss-probability targets for these vehicles. "
-            "Their α is a placeholder, not a result — do not report it. Relax the "
-            "targets or strengthen the guarantee / grant reserve and re-run."
+            "meets the hurdle IRR and loss-probability targets for these vehicles, "
+            "so they receive no allocation and are excluded from the totals below. "
+            "Relax the targets or strengthen the guarantee / grant reserve and re-run."
         )
-    elif result.status not in ("optimal", "optimal_inaccurate"):
+    if result.lp_status not in ("optimal", "optimal_inaccurate"):
         st.error(
-            f"**Portfolio allocation did not solve (status: {result.status}).** "
+            f"**Portfolio allocation did not solve (status: {result.lp_status}).** "
             "Allocations are shown as zero. Check the catalytic budget, CVaR limit "
             "and minimum deployment settings."
         )
@@ -715,11 +736,12 @@ def page_results() -> None:
         com = result.commercial_allocations.get(i, 0)
         rows.append({"Vehicle": name,
                      "Allocation": f"${result.allocations.get(i,0)/1e6:.1f}M",
-                     "Alpha": f"{result.catalytic_fractions.get(i,0):.1%}",
+                     "Alpha": _fmt_alpha(result, i),
                      "Catalytic": f"${cat/1e6:.1f}M",
                      "Commercial": f"${com/1e6:.1f}M",
                      "Leverage": f"{com/max(cat,1):.1f}×",
-                     "Marg. Eff.": f"{result.marginal_catalytic_efficiency.get(i,0):.1f}×"})
+                     "Marg. Eff.": "—" if np.isnan(_alpha(result, i))
+                     else f"{result.marginal_catalytic_efficiency.get(i,0):.1f}×"})
     rows.sort(key=lambda r: float(r["Leverage"].replace("×", "")), reverse=True)
     st.dataframe(pd.DataFrame(rows).set_index("Vehicle"))
 
@@ -728,7 +750,13 @@ def page_results() -> None:
         st.markdown(_portfolio_commentary(result, inputs, names))
         st.divider()
         for i, name in enumerate(names):
-            alpha   = result.catalytic_fractions.get(i, 0)
+            alpha   = _alpha(result, i)
+            if np.isnan(alpha):
+                st.markdown(f"**{name}** — calibration infeasible: no catalytic "
+                            "fraction meets the investor targets. Excluded from the portfolio.")
+                if i < len(names) - 1:
+                    st.divider()
+                continue
             cat     = result.catalytic_allocations.get(i, 0)
             com     = result.commercial_allocations.get(i, 0)
             lev     = com / max(cat, 1)
@@ -772,11 +800,19 @@ def _sens_comparison(base, mod, names: list[str], label: str) -> None:
     m_irr = mod.portfolio_irr_distribution
     bm = float(np.median(b_irr[np.isfinite(b_irr)])) if np.any(np.isfinite(b_irr)) else float("nan")
     mm = float(np.median(m_irr[np.isfinite(m_irr)])) if np.any(np.isfinite(m_irr)) else float("nan")
-    ba = float(np.mean(list(base.catalytic_fractions.values())))
-    ma = float(np.mean(list(mod.catalytic_fractions.values())))
+    ba = _mean_feasible_alpha(base)
+    ma = _mean_feasible_alpha(mod)
+    newly_bad = [names[i] for i in mod.infeasible_vehicles if i not in base.infeasible_vehicles]
+    if newly_bad:
+        st.error(f"Under this stress test, calibration becomes **infeasible** for: "
+                 f"{', '.join(newly_bad)}. Mean alpha below covers feasible vehicles only.")
     rows = [
-        {"Metric": "Mean Alpha", "Base": f"{ba:.1%}", "Modified": f"{ma:.1%}",
+        {"Metric": "Mean Alpha (feasible vehicles)",
+         "Base": f"{ba:.1%}", "Modified": f"{ma:.1%}",
          "Δ": f"{(ma-ba)*100:+.1f} pp"},
+        {"Metric": "Infeasible vehicles", "Base": str(len(base.infeasible_vehicles)),
+         "Modified": str(len(mod.infeasible_vehicles)),
+         "Δ": f"{len(mod.infeasible_vehicles)-len(base.infeasible_vehicles):+d}"},
         {"Metric": "Portfolio Leverage", "Base": f"{base.leverage_ratio:.2f}×",
          "Modified": f"{mod.leverage_ratio:.2f}×",
          "Δ": f"{mod.leverage_ratio-base.leverage_ratio:+.2f}×"},
@@ -792,9 +828,9 @@ def _sens_comparison(base, mod, names: list[str], label: str) -> None:
     idxs = sorted(base.catalytic_fractions.keys())
     fig = go.Figure([
         go.Bar(name="Base", x=[names[i] for i in idxs],
-               y=[base.catalytic_fractions[i]*100 for i in idxs], marker_color="#1565C0"),
+               y=[_alpha(base, i)*100 for i in idxs], marker_color="#1565C0"),
         go.Bar(name=label, x=[names[i] for i in idxs],
-               y=[mod.catalytic_fractions[i]*100 for i in idxs], marker_color="#EF6C00"),
+               y=[_alpha(mod, i)*100 for i in idxs], marker_color="#EF6C00"),
     ])
     fig.update_layout(barmode="group", yaxis_title="Alpha (%)", height=300,
                       title=f"Alpha: Base vs {label}",

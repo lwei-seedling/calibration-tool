@@ -399,7 +399,8 @@ minimise weighted-average catalytic fraction.
 
 - **Infeasible calibration**: `CatalyticCalibrator` raises `ValueError: Constraints infeasible`.
   `PortfolioOptimizer` catches it, lists the vehicle in `PortfolioResult.infeasible_vehicles`
-  and sets `status="calibration_infeasible"` (alpha is a placeholder, never a result). To fix,
+  sets `status="calibration_infeasible"`, forces its LP allocation to 0, and reports its alpha
+  as NaN (the raw LP status is in `lp_status`). To fix,
   either (a) relax `investor_hurdle_irr` / `max_loss_probability` in `CalibratorConfig`,
   or (b) add more protective mitigants (higher `guarantee_coverage` or `grant_reserve`).
 

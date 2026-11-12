@@ -93,8 +93,8 @@ West Africa Clean Energy Fund    6,000,000         16.8%   1,007,176    4,992,82
 - **CVaR** — expected senior loss rate in the worst 5% of scenarios; must stay below `cvar_max`.
 - **Solver status** — `optimal` / `optimal_inaccurate` are usable. `calibration_infeasible`
   means at least one vehicle cannot meet investor targets at any α (see
-  `result.infeasible_vehicles`); any other status means the allocation LP failed
-  and allocations are zero. See [Troubleshooting](#troubleshooting).
+  `result.infeasible_vehicles`; those vehicles are excluded). If
+  `result.lp_status` is anything else, the allocation LP failed and allocations are zero. See [Troubleshooting](#troubleshooting).
 
 ---
 
@@ -203,9 +203,9 @@ Read these before relying on any number the tool produces:
   before quoting a figure.
 - **Infeasible results are flagged, not solved.** If no catalytic fraction
   meets the investor constraints, the vehicle is listed in
-  `PortfolioResult.infeasible_vehicles` and `status` is
-  `calibration_infeasible`; its reported α is a placeholder. If the portfolio
-  LP fails, allocations are returned as zero.
+  `PortfolioResult.infeasible_vehicles`, gets zero allocation, has α reported
+  as `NaN`, and `status` is `calibration_infeasible`. If the portfolio LP
+  fails, allocations are zero and `lp_status` gives the solver status.
 
 ---
 

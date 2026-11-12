@@ -68,9 +68,10 @@ def print_results(result: PortfolioResult, inputs: PortfolioInputs, vehicle_name
     if result.infeasible_vehicles:
         bad = ", ".join(vehicle_names[v] for v in result.infeasible_vehicles)
         print(f"  !! INFEASIBLE VEHICLES : {bad}")
-        print("     No alpha meets the investor constraints; alpha shown is a placeholder.")
-    elif result.status not in ("optimal", "optimal_inaccurate"):
-        print("  !! LP DID NOT SOLVE    : allocations below are zero, not a recommendation.")
+        print("     No alpha meets the investor constraints.")
+        print("     These vehicles are excluded from the allocation (shown as INFEASIBLE).")
+    if result.lp_status not in ("optimal", "optimal_inaccurate"):
+        print(f"  !! LP DID NOT SOLVE    : status={result.lp_status}; allocations are zero, not a recommendation.")
     print(f"  Total budget           : ${inputs.total_budget:>12,.0f}")
     print(f"  Total deployed capital : ${total_deployed:>12,.0f}")
     print(f"  Total catalytic capital: ${total_catalytic:>12,.0f}  ({total_catalytic/ref:.1%} of deployed)")
@@ -95,14 +96,16 @@ def print_results(result: PortfolioResult, inputs: PortfolioInputs, vehicle_name
         rows.append({
             "Vehicle": name,
             "Allocation $": f"{alloc:,.0f}",
-            "Alpha (cat %)": f"{alpha:.1%}",
+            "Alpha (cat %)": "INFEASIBLE" if np.isnan(alpha) else f"{alpha:.1%}",
             "Catalytic $": f"{cat:,.0f}",
             "Commercial $": f"{com:,.0f}",
             "Leverage (x)": f"{com / max(cat, 1.0):.1f}x",
-            "Marg. Efficiency": f"{eff:.1f}x",
+            "Marg. Efficiency": "—" if np.isnan(eff) else f"{eff:.1f}x",
         })
     # Sort by marginal efficiency descending
-    rows.sort(key=lambda r: float(r["Marg. Efficiency"].replace("x", "")), reverse=True)
+    # Sort by marginal efficiency descending; infeasible vehicles last
+    rows.sort(key=lambda r: -1.0 if r["Marg. Efficiency"] == "—"
+              else float(r["Marg. Efficiency"].replace("x", "")), reverse=True)
     df = pd.DataFrame(rows).set_index("Vehicle")
     print(df.to_string())
 
